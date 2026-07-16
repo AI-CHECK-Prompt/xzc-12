@@ -31,6 +31,35 @@ const pondSchema = new mongoose.Schema({
     enum: ['auto', 'manual', 'off'],
     default: 'auto'
   },
+  // 命令下发相关：解决"假启动"问题
+  commandPending: {
+    type: Boolean,
+    default: false
+  },
+  lastCommand: {
+    type: String,
+    default: ''
+  },
+  lastCommandId: {
+    type: String,
+    default: ''
+  },
+  lastCommandTime: {
+    type: Date,
+    default: null
+  },
+  lastCommandAckAt: {
+    type: Date,
+    default: null
+  },
+  lastCommandFailReason: {
+    type: String,
+    default: ''
+  },
+  aeratorStatusFault: {
+    type: Boolean,
+    default: false
+  },
   status: {
     type: String,
     enum: ['online', 'offline'],

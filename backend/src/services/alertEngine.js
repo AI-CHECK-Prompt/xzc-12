@@ -77,25 +77,65 @@ async function createAlert(pondId, type, level, value, threshold, message) {
 }
 
 // 溶氧过低时自动发 MQTT 命令启动增氧机
+// 修复"假启动"：先发 MQTT 并等待 broker ack，仅在命令确实下发到 broker 时才将
+// 状态置为 running；下发失败时只标记 pending 状态，DB 不显示为"已启动"
 async function triggerAerator(pondId) {
   try {
-    // 更新数据库中的增氧机状态
-    await Pond.findOneAndUpdate(
-      { pondId },
-      {
-        $set: {
-          aeratorStatus: true,
-          aeratorMode: 'auto'
-        }
-      }
-    );
+    // 1) 先发 MQTT 命令，等待真实的 publish 结果
+    const pubResult = await publishControl(pondId, 'aerator_on');
 
-    // 发布 MQTT 控制命令
-    const success = publishControl(pondId, 'aerator_on');
-    if (success) {
-      console.log(`[自动控制] ${pondId} 增氧机已自动启动（溶氧过低）`);
+    if (pubResult.success) {
+      // 命令已下发到 broker：标记为 pending 等待设备回执
+      // 真正的 running 状态由设备 ack（handleControlAck）来确认
+      await Pond.findOneAndUpdate(
+        { pondId },
+        {
+          $set: {
+            commandPending: true,
+            lastCommand: 'aerator_on',
+            lastCommandId: pubResult.commandId,
+            lastCommandTime: new Date(),
+            lastCommandFailReason: '',
+            // 暂不把 aeratorStatus 置 true，等设备 ack 成功后再置
+            aeratorMode: 'auto',
+            aeratorStatusFault: false
+          }
+        }
+      );
+      console.log(`[自动控制] ${pondId} 增氧机自动启动命令已下发（commandId=${pubResult.commandId}），等待设备回执`);
     } else {
-      console.log(`[自动控制] ${pondId} 增氧机自动启动命令已记录（MQTT未连接）`);
+      // 下发失败：DB 不显示为已启动，但提示运维人员命令未确认
+      await Pond.findOneAndUpdate(
+        { pondId },
+        {
+          $set: {
+            commandPending: true,
+            lastCommand: 'aerator_on',
+            lastCommandId: pubResult.commandId || '',
+            lastCommandTime: new Date(),
+            lastCommandFailReason: pubResult.reason || 'unknown',
+            aeratorStatus: false,
+            aeratorMode: 'auto'
+          }
+        }
+      );
+      console.error(`[自动控制] ${pondId} 增氧机自动启动命令下发失败：${pubResult.message}（reason=${pubResult.reason}）`);
+
+      // 创建 critical 告警：命令未下发成功，存在缺氧风险
+      const isDuplicate = await isAlertDuplicate(pondId, 'aerator_command_failed');
+      if (!isDuplicate) {
+        const alert = new Alert({
+          pondId,
+          type: 'aerator_command_failed',
+          level: 'critical',
+          value: 0,
+          threshold: 0,
+          message: `增氧机自动启动命令下发失败（${pubResult.reason}），请检查 MQTT/网络/设备，鱼虾存在缺氧风险`
+        });
+        await alert.save();
+        await markAlertSent(pondId, 'aerator_command_failed');
+        broadcastAlert(alert.toObject());
+      }
     }
   } catch (err) {
     console.error('[自动控制] 触发增氧机失败:', err.message);

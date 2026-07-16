@@ -1,37 +1,61 @@
 const express = require('express');
 const SensorData = require('../models/SensorData');
+const Pond = require('../models/Pond');
 const { authMiddleware } = require('../middleware/auth');
 const { getPondRealtime } = require('../services/redisClient');
 
 const router = express.Router();
 
+// 把 Pond 模型中的控制状态字段合并到返回数据中
+// 解决"假启动"问题：实时数据必须携带 commandPending/lastCommand*，前端据此判断显示
+function buildRealtimePayload(pondId, sensorData) {
+  const payload = sensorData ? { ...sensorData } : {};
+  return Pond.findOne({ pondId })
+    .select(
+      'aeratorStatus aeratorMode commandPending lastCommand lastCommandId lastCommandTime lastCommandAckAt lastCommandFailReason aeratorStatusFault'
+    )
+    .lean()
+    .then((pond) => {
+      if (pond) {
+        payload.aeratorStatus = pond.aeratorStatus;
+        payload.aeratorMode = pond.aeratorMode;
+        payload.commandPending = !!pond.commandPending;
+        payload.lastCommand = pond.lastCommand || '';
+        payload.lastCommandId = pond.lastCommandId || '';
+        payload.lastCommandTime = pond.lastCommandTime || null;
+        payload.lastCommandAckAt = pond.lastCommandAckAt || null;
+        payload.lastCommandFailReason = pond.lastCommandFailReason || '';
+        payload.aeratorStatusFault = !!pond.aeratorStatusFault;
+      }
+      return payload;
+    });
+}
+
 // GET /api/data/:pondId/realtime - 获取塘口实时数据
 router.get('/:pondId/realtime', authMiddleware, async (req, res) => {
   try {
-    const data = await getPondRealtime(req.params.pondId);
-    if (!data) {
+    const cached = await getPondRealtime(req.params.pondId);
+    let sensorData = null;
+    if (cached) {
+      sensorData = cached;
+    } else {
       // 如果 Redis 中没有，尝试从 MongoDB 取最新一条
       const latest = await SensorData.findOne({ pondId: req.params.pondId })
         .sort({ timestamp: -1 })
         .lean();
-
-      if (!latest) {
-        return res.json({ success: true, data: null });
-      }
-
-      return res.json({
-        success: true,
-        data: {
+      if (latest) {
+        sensorData = {
           temperature: latest.temperature,
           ph: latest.ph,
           dissolvedOxygen: latest.dissolvedOxygen,
           timestamp: latest.timestamp,
           deviceId: latest.deviceId
-        }
-      });
+        };
+      }
     }
 
-    res.json({ success: true, data });
+    const payload = await buildRealtimePayload(req.params.pondId, sensorData);
+    res.json({ success: true, data: payload });
   } catch (err) {
     console.error('[实时数据] 错误:', err.message);
     res.status(500).json({ success: false, message: '获取实时数据失败' });

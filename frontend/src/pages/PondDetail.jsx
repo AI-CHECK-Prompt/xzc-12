@@ -184,8 +184,39 @@ export default function PondDetailPage() {
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                 <span>增氧机</span>
-                <span>{data.aeratorStatus === 'running' ? '运行中' : '已关闭'}</span>
+                <span>
+                  {(() => {
+                    // 增氧机状态展示：
+                    // 优先级：commandPending=true 视为 pending（避免"假启动"误导）
+                    // 其次根据 aeratorStatus 布尔或字符串
+                    if (data.commandPending) {
+                      return <span style={{ color: '#faad14' }}>命令待确认（现场增氧机可能未启动）</span>;
+                    }
+                    const isRunning = data.aeratorStatus === true || data.aeratorStatus === 'running';
+                    if (isRunning) {
+                      return <span style={{ color: '#52c41a' }}>已启动-自动模式</span>;
+                    }
+                    if (data.aeratorStatus === 'fault' || data.aeratorStatusFault) {
+                      return <span style={{ color: '#ff4d4f' }}>故障</span>;
+                    }
+                    return <span style={{ color: '#999' }}>已关闭</span>;
+                  })()}
+                </span>
               </div>
+              {data.commandPending && data.lastCommandTime && (
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span>命令下发时间</span>
+                  <span style={{ color: '#faad14' }}>
+                    {dayjs(data.lastCommandTime).format('YYYY-MM-DD HH:mm:ss')}
+                  </span>
+                </div>
+              )}
+              {data.lastCommandFailReason && data.commandPending && (
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span>失败原因</span>
+                  <span style={{ color: '#ff4d4f' }}>{data.lastCommandFailReason}</span>
+                </div>
+              )}
             </div>
           </Card>
 
@@ -244,7 +275,16 @@ export default function PondDetailPage() {
               <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>增氧机控制</div>
               <AeratorControl
                 pondId={pondId}
-                status={data.aeratorStatus || 'stopped'}
+                status={
+                  // 优先：commandPending 时显示 pending，避免"假启动"误显示为 running
+                  data.commandPending
+                    ? 'pending'
+                    : data.aeratorStatusFault
+                    ? 'fault'
+                    : data.aeratorStatus === true || data.aeratorStatus === 'running'
+                    ? 'running'
+                    : 'stopped'
+                }
                 mode={data.aeratorMode || 'auto'}
                 onControl={handleAeratorControl}
               />

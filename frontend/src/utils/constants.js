@@ -13,6 +13,7 @@ export const ALERT_TYPE_MAP = {
   low_temp: '水温偏低告警',
   device_offline: '设备离线告警',
   aerator_fault: '增氧机故障',
+  aerator_command_failed: '增氧机命令下发失败',
   power_failure: '断电告警',
 };
 
@@ -28,9 +29,15 @@ export const ALERT_LEVEL_LABEL = {
   info: '提示',
 };
 
+// 增氧机状态：
+//  - running:  设备 ack 确认启动成功
+//  - stopped:  设备 ack 确认关闭
+//  - pending:  命令已下发但尚未收到设备确认（最容易与 running 混淆，单独区分）
+//  - fault:    设备回执失败
 export const AERATOR_STATUS_MAP = {
-  running: '运行中',
+  running: '已启动-自动模式',
   stopped: '已关闭',
+  pending: '命令待确认',
   fault: '故障',
 };
 

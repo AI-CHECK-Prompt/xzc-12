@@ -44,6 +44,15 @@ function initMqttClient() {
         }
       });
 
+      // 订阅控制回执 topic：设备执行控制命令后的 ack
+      client.subscribe('pond/+/control/ack', { qos: 1 }, (err) => {
+        if (err) {
+          console.error('[MQTT] 订阅 pond/+/control/ack 失败:', err.message);
+        } else {
+          console.log('[MQTT] 已订阅 pond/+/control/ack');
+        }
+      });
+
       resolve(client);
     });
 
@@ -64,6 +73,9 @@ function initMqttClient() {
         } else if (topic.endsWith('/status')) {
           // 设备状态
           handleDeviceStatus(pondId, payload);
+        } else if (topic.endsWith('/control/ack')) {
+          // 控制回执
+          handleControlAck(pondId, payload);
         }
       } catch (err) {
         console.error('[MQTT] 消息解析失败:', err.message, 'topic:', topic);
@@ -133,25 +145,124 @@ async function handleDeviceStatus(pondId, payload) {
   }
 }
 
-// 发布控制命令
-function publishControl(pondId, command) {
-  if (!client || !connected) {
-    console.error('[MQTT] 无法发送控制命令：未连接');
-    return false;
-  }
-  const topic = `pond/${pondId}/control`;
-  const payload = JSON.stringify({
-    command,
-    timestamp: new Date().toISOString()
-  });
-  client.publish(topic, payload, { qos: 1 }, (err) => {
-    if (err) {
-      console.error('[MQTT] 发布控制命令失败:', err.message);
-    } else {
-      console.log(`[MQTT] 已发送控制命令: ${command} -> ${topic}`);
+// 发布控制命令（返回 Promise，准确反映 broker ack 结果）
+function publishControl(pondId, command, options = {}) {
+  const { commandId, timeoutMs = 5000 } = options;
+  return new Promise((resolve) => {
+    if (!client || !connected) {
+      console.error(`[MQTT] 无法发送控制命令：未连接，pondId=${pondId}, command=${command}`);
+      return resolve({
+        success: false,
+        reason: 'mqtt_disconnected',
+        message: 'MQTT 未连接，命令未下发'
+      });
+    }
+
+    const topic = `pond/${pondId}/control`;
+    const cid = commandId || `${pondId}_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
+    const payload = JSON.stringify({
+      command,
+      commandId: cid,
+      timestamp: new Date().toISOString()
+    });
+
+    let settled = false;
+    // 超时保护：若 broker 长时间不 ack，按失败处理
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      console.error(`[MQTT] 发布控制命令超时（${timeoutMs}ms），pondId=${pondId}, command=${command}`);
+      resolve({
+        success: false,
+        commandId: cid,
+        reason: 'publish_timeout',
+        message: 'MQTT 发布超时，未收到 broker 确认'
+      });
+    }, timeoutMs);
+
+    try {
+      client.publish(topic, payload, { qos: 1 }, (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (err) {
+          console.error(`[MQTT] 发布控制命令失败: ${err.message}, pondId=${pondId}, command=${command}`);
+          return resolve({
+            success: false,
+            commandId: cid,
+            reason: 'publish_error',
+            message: `MQTT 发布失败: ${err.message}`
+          });
+        }
+        console.log(`[MQTT] 已发送控制命令: ${command} -> ${topic} (commandId=${cid})`);
+        resolve({
+          success: true,
+          commandId: cid,
+          reason: 'published',
+          message: '命令已成功下发到 broker'
+        });
+      });
+    } catch (e) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      console.error(`[MQTT] 发布抛出异常: ${e.message}, pondId=${pondId}, command=${command}`);
+      resolve({
+        success: false,
+        commandId: cid,
+        reason: 'publish_exception',
+        message: `MQTT 发布异常: ${e.message}`
+      });
     }
   });
-  return true;
+}
+
+// 处理设备对控制命令的回执（ack）：清掉 pending 状态
+async function handleControlAck(pondId, payload) {
+  try {
+    const { commandId, command, result, error } = payload || {};
+    if (!pondId || !commandId) return;
+
+    const Pond = require('../models/Pond');
+    const pond = await Pond.findOne({ pondId });
+    if (!pond) return;
+
+    // 只在 pending 与当前 commandId 匹配时清除，避免乱序覆盖
+    if (pond.commandPending && pond.lastCommandId === commandId) {
+      const success = result === 'ok' || result === 'success' || result === true;
+      const update = {
+        $set: {
+          commandPending: false,
+          lastCommandAckAt: new Date()
+        }
+      };
+      if (success) {
+        // 硬件确认执行成功：以硬件回执为准设置最终状态
+        if (command === 'aerator_on') {
+          update.$set.aeratorStatus = true;
+          update.$set.aeratorMode = 'auto';
+        } else if (command === 'aerator_off') {
+          update.$set.aeratorStatus = false;
+        }
+      } else {
+        // 硬件回执失败：还原 DB 状态，并标记 fault
+        if (command === 'aerator_on') {
+          update.$set.aeratorStatus = false;
+          update.$set.aeratorStatusFault = true;
+        }
+      }
+      await Pond.findOneAndUpdate({ pondId }, update);
+
+      const { broadcastDeviceStatus } = require('./websocket');
+      broadcastDeviceStatus(pondId, success ? 'control_ack_ok' : 'control_ack_fail');
+
+      console.log(`[MQTT] 设备回执 ${commandId} (${command}) -> ${success ? 'OK' : 'FAIL'}${error ? ', err=' + error : ''}`);
+    } else {
+      console.log(`[MQTT] 收到过期的设备回执 ${commandId}，忽略（当前 pending=${pond?.commandPending}, lastCommandId=${pond?.lastCommandId}）`);
+    }
+  } catch (err) {
+    console.error('[MQTT] 处理控制回执失败:', err.message);
+  }
 }
 
 function getClient() {
@@ -162,4 +273,4 @@ function isConnected() {
   return connected;
 }
 
-module.exports = { initMqttClient, publishControl, getClient, isConnected };
+module.exports = { initMqttClient, publishControl, handleControlAck, getClient, isConnected };
