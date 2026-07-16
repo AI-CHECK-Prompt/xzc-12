@@ -111,35 +111,91 @@ function initMqttClient() {
 }
 
 // 处理设备状态消息
+// 修复点：
+// 1) /status 主题消息必须同步更新 Redis last_seen，否则后续离线检查会数据不一致
+// 2) 设备从 offline 重连回 online 时，先按"上次 lastOnline"生成补发离线告警（真实时长），
+//    再刷新 lastOnline，避免"6 小时掉线后短暂恢复"把离线事件吞掉、运维收不到告警
 async function handleDeviceStatus(pondId, payload) {
   try {
     const Device = require('../models/Device');
     const Pond = require('../models/Pond');
-    const { broadcastDeviceStatus } = require('./websocket');
+    const { setDeviceLastSeen, isAlertDuplicate, markAlertSent } = require('./redisClient');
+    const { broadcastDeviceStatus, broadcastAlert } = require('./websocket');
+    const Alert = require('../models/Alert');
+    const config = require('../config');
 
     const { deviceId, status } = payload;
+    const newStatus = status || 'online';
 
     if (deviceId) {
+      const existingDevice = await Device.findOne({ deviceId });
+      const wasOffline = existingDevice && existingDevice.status === 'offline';
+      const previousLastOnline = existingDevice?.lastOnline;
+
+      // 设备从 offline 重连回 online：先按上次 lastOnline 补发真实离线告警
+      // 防止 checkDeviceOffline 漏检（设备长时间离线后 checkDeviceOffline 可能因为各种原因没生成告警）
+      if (wasOffline && newStatus === 'online' && previousLastOnline) {
+        const lastSeenMs = new Date(previousLastOnline).getTime();
+        if (Number.isFinite(lastSeenMs)) {
+          const now = Date.now();
+          const offlineMinutes = Math.floor((now - lastSeenMs) / 60000);
+          const safeOfflineMinutes = offlineMinutes > 0
+            ? offlineMinutes
+            : config.deviceOfflineMinutes;
+          if (offlineMinutes <= 0) {
+            console.warn(`[MQTT-状态] ${deviceId} 历史 lastOnline 异常（${previousLastOnline}），疑似时钟漂移，使用阈值 ${config.deviceOfflineMinutes} 分钟兜底`);
+          }
+          // 只在确实超过阈值时补告警
+          if (offlineMinutes >= config.deviceOfflineMinutes) {
+            const targetPondId = pondId || existingDevice.pondId;
+            if (targetPondId) {
+              const isDuplicate = await isAlertDuplicate(targetPondId, 'device_offline');
+              if (!isDuplicate) {
+                const lastSeenStr = new Date(lastSeenMs).toLocaleString('zh-CN', { hour12: false });
+                const alert = new Alert({
+                  pondId: targetPondId,
+                  type: 'device_offline',
+                  level: 'critical',
+                  value: safeOfflineMinutes,
+                  threshold: config.deviceOfflineMinutes,
+                  message: `设备 ${deviceId} 已离线 ${safeOfflineMinutes} 分钟（最后在线：${lastSeenStr}）`
+                });
+                await alert.save();
+                await markAlertSent(targetPondId, 'device_offline');
+                broadcastAlert(alert.toObject());
+                console.log(`[MQTT-状态] 补发离线告警: ${deviceId} (${targetPondId}) 离线 ${safeOfflineMinutes} 分钟，最后在线 ${lastSeenStr}`);
+              }
+            }
+          }
+        }
+      }
+
+      const updateFields = { status: newStatus };
+      if (newStatus === 'online') {
+        // 重连时刷新 lastOnline 为"现在"
+        updateFields.lastOnline = new Date();
+      }
+
       await Device.findOneAndUpdate(
         { deviceId },
-        {
-          $set: {
-            status: status || 'online',
-            lastOnline: new Date()
-          }
-        },
+        { $set: updateFields },
         { upsert: true }
       );
+
+      // 同步 Redis 缓存，保证 /status 消息也会刷新 last_seen（之前只 dataProcessor 刷新）
+      if (newStatus === 'online') {
+        await setDeviceLastSeen(deviceId);
+      }
     }
 
     if (pondId) {
       await Pond.findOneAndUpdate(
         { pondId },
-        { $set: { status: status || 'online' } }
+        { $set: { status: newStatus } }
       );
     }
 
-    broadcastDeviceStatus(pondId, status || 'online');
+    broadcastDeviceStatus(pondId, newStatus);
   } catch (err) {
     console.error('[MQTT] 处理设备状态失败:', err.message);
   }

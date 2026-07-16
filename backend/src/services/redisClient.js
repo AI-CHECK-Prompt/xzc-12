@@ -89,7 +89,10 @@ async function markAlertSent(pondId, type) {
 async function setDeviceLastSeen(deviceId) {
   const client = getRedis();
   const key = `device:${deviceId}:last_seen`;
-  await client.setex(key, 1200, Date.now().toString());
+  // TTL 必须远大于 deviceOfflineMinutes，否则设备长时间离线后 key 过期
+  // getDeviceLastSeen 返回 null，离线检测逻辑失效，无法算出真实离线时长
+  // 使用 config.deviceLastSeenTtlSeconds（默认 7 天）兜住"夜间断电/网络中断"场景
+  await client.setex(key, config.deviceLastSeenTtlSeconds, Date.now().toString());
 }
 
 // 获取设备最后在线时间
@@ -97,7 +100,10 @@ async function getDeviceLastSeen(deviceId) {
   const client = getRedis();
   const key = `device:${deviceId}:last_seen`;
   const timestamp = await client.get(key);
-  return timestamp ? parseInt(timestamp, 10) : null;
+  if (!timestamp) return null;
+  const parsed = parseInt(timestamp, 10);
+  // 防御：Redis 中数据异常（非数字）时返回 null，由调用方回退到 MongoDB
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 module.exports = {

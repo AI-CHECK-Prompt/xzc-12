@@ -143,18 +143,43 @@ async function triggerAerator(pondId) {
 }
 
 // 定时检查设备离线
+// 修复点：
+// 1) Redis last_seen 缺失时回退到 MongoDB Device.lastOnline，避免"6 小时掉线但 key 过期"导致漏判
+// 2) 离线时长按真实 lastSeen 计算（不是写死阈值），并在告警 message 中展示
+// 3) 防御 lastSeen 在未来的场景（设备/服务端时钟漂移），按阈值兜底并打日志
 async function checkDeviceOffline() {
   try {
     const Device = require('../models/Device');
     const Pond = require('../models/Pond');
     const { getDeviceLastSeen } = require('./redisClient');
 
-    const threshold = Date.now() - config.deviceOfflineMinutes * 60 * 1000;
+    const now = Date.now();
+    const threshold = now - config.deviceOfflineMinutes * 60 * 1000;
 
     const devices = await Device.find({ status: 'online' });
     for (const device of devices) {
-      const lastSeen = await getDeviceLastSeen(device.deviceId);
-      if (lastSeen && lastSeen < threshold) {
+      // 优先 Redis，缺失时回退到 MongoDB Device.lastOnline
+      // 解决：设备长时间离线（> Redis TTL）后 key 过期，getDeviceLastSeen 返回 null
+      let lastSeenMs = await getDeviceLastSeen(device.deviceId);
+      if (lastSeenMs === null && device.lastOnline) {
+        const mongoTs = new Date(device.lastOnline).getTime();
+        if (Number.isFinite(mongoTs)) {
+          lastSeenMs = mongoTs;
+          console.log(`[离线检查] ${device.deviceId} Redis last_seen 已过期，回退到 MongoDB lastOnline=${new Date(mongoTs).toISOString()}`);
+        }
+      }
+
+      if (lastSeenMs && lastSeenMs < threshold) {
+        // 计算实际离线时长（毫秒 → 分钟，向下取整）
+        const offlineMinutes = Math.floor((now - lastSeenMs) / 60000);
+        // 防御：lastSeen 在未来（时钟漂移）会算出负值，按阈值兜底并打日志
+        const safeOfflineMinutes = offlineMinutes > 0
+          ? offlineMinutes
+          : config.deviceOfflineMinutes;
+        if (offlineMinutes <= 0) {
+          console.warn(`[离线检查] ${device.deviceId} lastSeen 在未来（${new Date(lastSeenMs).toISOString()}），疑似时钟漂移，使用阈值 ${config.deviceOfflineMinutes} 分钟兜底`);
+        }
+
         // 设备离线
         await Device.findOneAndUpdate(
           { deviceId: device.deviceId },
@@ -170,18 +195,19 @@ async function checkDeviceOffline() {
           // 检查去重后创建告警
           const isDuplicate = await isAlertDuplicate(device.pondId, 'device_offline');
           if (!isDuplicate) {
+            const lastSeenStr = new Date(lastSeenMs).toLocaleString('zh-CN', { hour12: false });
             const alert = new Alert({
               pondId: device.pondId,
               type: 'device_offline',
               level: 'critical',
-              value: 0,
-              threshold: 0,
-              message: `设备 ${device.deviceId} 已离线超过${config.deviceOfflineMinutes}分钟`
+              value: safeOfflineMinutes,
+              threshold: config.deviceOfflineMinutes,
+              message: `设备 ${device.deviceId} 已离线 ${safeOfflineMinutes} 分钟（最后在线：${lastSeenStr}）`
             });
             await alert.save();
             await markAlertSent(device.pondId, 'device_offline');
             broadcastAlert(alert.toObject());
-            console.log(`[告警] 设备离线: ${device.deviceId} (${device.pondId})`);
+            console.log(`[告警] 设备离线: ${device.deviceId} (${device.pondId}) 离线 ${safeOfflineMinutes} 分钟，最后在线 ${lastSeenStr}`);
           }
         }
       }

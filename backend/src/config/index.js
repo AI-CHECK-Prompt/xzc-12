@@ -46,5 +46,11 @@ module.exports = {
   alertDedupSeconds: 300,
 
   // 设备离线判定时间（分钟）
-  deviceOfflineMinutes: 10
+  deviceOfflineMinutes: 10,
+
+  // 设备 last_seen 在 Redis 中的 TTL（秒）
+  // 必须远大于 deviceOfflineMinutes，避免设备长时间离线后 Redis key 过期
+  // 导致 getDeviceLastSeen 返回 null，进而误判离线时长
+  // 默认 7 天，覆盖绝大多数"夜间断电/网络中断"场景
+  deviceLastSeenTtlSeconds: 7 * 24 * 60 * 60
 };
