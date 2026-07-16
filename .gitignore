@@ -1,0 +1,27 @@
+# Rust
+target/
+Cargo.lock
+*.rs.bk
+
+# Svelte/Node
+node_modules/
+package-lock.json
+yarn.lock
+dist/
+.build/
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Database
+*.db
+postgres-data/
+
+# OS
+.DS_Store
+Thumbs.db
