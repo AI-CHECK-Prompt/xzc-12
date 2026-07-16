@@ -12,15 +12,18 @@ const sensorDataSchema = new mongoose.Schema({
   },
   temperature: {
     type: Number,
-    required: true
+    required: false,
+    default: null
   },
   ph: {
     type: Number,
-    required: true
+    required: false,
+    default: null
   },
   dissolvedOxygen: {
     type: Number,
-    required: true
+    required: false,
+    default: null
   },
   timestamp: {
     type: Date,
