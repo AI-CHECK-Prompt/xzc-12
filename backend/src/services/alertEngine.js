@@ -4,6 +4,7 @@ const Pond = require('../models/Pond');
 const { isAlertDuplicate, markAlertSent } = require('./redisClient');
 const { broadcastAlert } = require('./websocket');
 const { publishControl } = require('./mqttClient');
+const { supportsControlAck, getCommandAckTimeoutMs } = require('../utils/firmware');
 
 // 检查传感器数据是否触发告警
 async function checkThresholds(data) {
@@ -79,43 +80,57 @@ async function createAlert(pondId, type, level, value, threshold, message) {
 // 溶氧过低时自动发 MQTT 命令启动增氧机
 // 修复"假启动"：先发 MQTT 并等待 broker ack，仅在命令确实下发到 broker 时才将
 // 状态置为 running；下发失败时只标记 pending 状态，DB 不显示为"已启动"
+// 同时设置 commandPendingExpiresAt，老固件 5s/新固件 30s 后由 commandTimeoutChecker 兜底
 async function triggerAerator(pondId) {
   try {
+    // 先查塘口以读取固件版本，决定超时与是否标记无回执
+    const pondDoc = await Pond.findOne({ pondId });
+    const hasAck = supportsControlAck(pondDoc?.deviceFirmwareVersion);
+    const ackTimeoutMs = getCommandAckTimeoutMs(pondDoc?.deviceFirmwareVersion);
+
     // 1) 先发 MQTT 命令，等待真实的 publish 结果
     const pubResult = await publishControl(pondId, 'aerator_on');
 
     if (pubResult.success) {
       // 命令已下发到 broker：标记为 pending 等待设备回执
       // 真正的 running 状态由设备 ack（handleControlAck）来确认
+      // 老固件 5s 后由 commandTimeoutChecker 乐观更新
+      const expiresAt = new Date(Date.now() + ackTimeoutMs);
       await Pond.findOneAndUpdate(
         { pondId },
         {
           $set: {
             commandPending: true,
+            commandPendingExpiresAt: expiresAt,
             lastCommand: 'aerator_on',
             lastCommandId: pubResult.commandId,
             lastCommandTime: new Date(),
             lastCommandFailReason: '',
             // 暂不把 aeratorStatus 置 true，等设备 ack 成功后再置
             aeratorMode: 'auto',
-            aeratorStatusFault: false
+            aeratorStatusFault: false,
+            lastCommandNoAck: !hasAck
           }
         }
       );
-      console.log(`[自动控制] ${pondId} 增氧机自动启动命令已下发（commandId=${pubResult.commandId}），等待设备回执`);
+      console.log(`[自动控制] ${pondId} 增氧机自动启动命令已下发（commandId=${pubResult.commandId}, hasAck=${hasAck}），等待设备回执或 ${ackTimeoutMs}ms 超时`);
     } else {
       // 下发失败：DB 不显示为已启动，但提示运维人员命令未确认
+      // 仍设置短超时，避免 commandPending 一直停留
+      const failDeadline = new Date(Date.now() + ackTimeoutMs);
       await Pond.findOneAndUpdate(
         { pondId },
         {
           $set: {
             commandPending: true,
+            commandPendingExpiresAt: failDeadline,
             lastCommand: 'aerator_on',
             lastCommandId: pubResult.commandId || '',
             lastCommandTime: new Date(),
             lastCommandFailReason: pubResult.reason || 'unknown',
             aeratorStatus: false,
-            aeratorMode: 'auto'
+            aeratorMode: 'auto',
+            lastCommandNoAck: !hasAck
           }
         }
       );

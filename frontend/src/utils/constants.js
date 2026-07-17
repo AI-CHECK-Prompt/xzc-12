@@ -30,10 +30,10 @@ export const ALERT_LEVEL_LABEL = {
 };
 
 // 增氧机状态：
-//  - running:  设备 ack 确认启动成功
-//  - stopped:  设备 ack 确认关闭
+//  - running:  设备 ack 确认启动成功（或老固件无回执超时兜底乐观更新）
+//  - stopped:  设备 ack 确认关闭（或老固件无回执超时兜底乐观更新）
 //  - pending:  命令已下发但尚未收到设备确认（最容易与 running 混淆，单独区分）
-//  - fault:    设备回执失败
+//  - fault:    设备回执失败 / 新固件超时未回执（设备可能真故障）
 export const AERATOR_STATUS_MAP = {
   running: '已启动-自动模式',
   stopped: '已关闭',
@@ -46,3 +46,7 @@ export const AERATOR_MODE_MAP = {
   manual: '手动模式',
   off: '关闭模式',
 };
+
+// 终端固件能力文案：仅展示用，所有"是否支持回执"判定以后端为准
+export const FIRMWARE_ACK_SUPPORTED_HINT = '终端支持硬件回执';
+export const FIRMWARE_NO_ACK_HINT = '终端固件较旧，不支持硬件回执，状态将按超时兜底自动确认，请现场核实';

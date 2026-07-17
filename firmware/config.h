@@ -38,7 +38,10 @@
 #define MAX_CACHE_SIZE 240  // 2小时 x 每分钟一条
 
 // 固件版本号
-#define FIRMWARE_VERSION "1.0.0"
+// 1.1.0 起：执行增氧机控制后主动回执（pond/{POND_ID}/control/ack），
+//           后端可据此区分"待确认"和"已确认"
+// 1.0.0：不发回执，后端走短超时兜底
+#define FIRMWARE_VERSION "1.1.0"
 
 // 心跳间隔（毫秒），默认30秒
 #define HEARTBEAT_INTERVAL 30000

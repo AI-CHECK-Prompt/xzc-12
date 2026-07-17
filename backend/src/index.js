@@ -14,6 +14,7 @@ const { initRedis } = require('./services/redisClient');
 const { initWebSocket } = require('./services/websocket');
 const { initMqttClient } = require('./services/mqttClient');
 const { checkDeviceOffline } = require('./services/alertEngine');
+const { startCommandTimeoutChecker } = require('./services/commandTimeoutChecker');
 
 // 路由
 const authRoutes = require('./routes/auth');
@@ -126,6 +127,9 @@ async function start() {
     setInterval(async () => {
       await checkDeviceOffline();
     }, 60000); // 每分钟检查一次
+
+    // 启动控制命令超时巡检：解决"老固件无回执导致待确认永久停留"
+    startCommandTimeoutChecker();
 
     console.log('[启动] 水质监控云平台后端服务已就绪');
   } catch (err) {

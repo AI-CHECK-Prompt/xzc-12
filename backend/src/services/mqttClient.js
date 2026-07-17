@@ -175,6 +175,10 @@ async function handleDeviceStatus(pondId, payload) {
         // 重连时刷新 lastOnline 为"现在"
         updateFields.lastOnline = new Date();
       }
+      // 终端上报的固件版本同步到 Device + Pond（能力判定依赖此字段）
+      if (payload.firmwareVersion) {
+        updateFields.firmwareVersion = payload.firmwareVersion;
+      }
 
       await Device.findOneAndUpdate(
         { deviceId },
@@ -189,9 +193,14 @@ async function handleDeviceStatus(pondId, payload) {
     }
 
     if (pondId) {
+      // 同步固件版本到 Pond，用于控制接口判定是否支持回执
+      const pondUpdate = { status: newStatus };
+      if (payload.firmwareVersion) {
+        pondUpdate.deviceFirmwareVersion = payload.firmwareVersion;
+      }
       await Pond.findOneAndUpdate(
         { pondId },
-        { $set: { status: newStatus } }
+        { $set: pondUpdate }
       );
     }
 
@@ -289,7 +298,10 @@ async function handleControlAck(pondId, payload) {
       const update = {
         $set: {
           commandPending: false,
-          lastCommandAckAt: new Date()
+          commandPendingExpiresAt: null,
+          lastCommandAckAt: new Date(),
+          // 收到明确回执后，老固件无回执标记也清掉
+          lastCommandNoAck: false
         }
       };
       if (success) {

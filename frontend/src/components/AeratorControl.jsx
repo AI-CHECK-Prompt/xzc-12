@@ -1,9 +1,19 @@
-import { useState } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { Button, Dialog, SpinLoading } from 'antd-mobile';
-import { AERATOR_STATUS_MAP, AERATOR_MODE_MAP } from '../utils/constants';
+import { AERATOR_STATUS_MAP, AERATOR_MODE_MAP, FIRMWARE_NO_ACK_HINT } from '../utils/constants';
 
-export default function AeratorControl({ pondId, status = 'stopped', mode = 'auto', onControl }) {
+export default function AeratorControl({
+  pondId,
+  status = 'stopped',
+  mode = 'auto',
+  // 倒计时与回执能力（修复"待确认"永久停留问题）
+  commandPendingExpiresAt = null,
+  lastCommandNoAck = false,
+  deviceFirmwareVersion = '',
+  onControl
+}) {
   const [loading, setLoading] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
 
   // 兼容 boolean 类型（老数据）以及字符串枚举
   const normalizeStatus = (s) => {
@@ -19,6 +29,30 @@ export default function AeratorControl({ pondId, status = 'stopped', mode = 'aut
 
   // pending 状态下禁止重复点击：避免在设备未确认时反复下发
   const buttonDisabled = !isManual || isPending || loading;
+
+  // 倒计时：每秒刷新一次；当 deadline 已过则停止更新
+  useEffect(() => {
+    if (!isPending) return undefined;
+    const deadline = commandPendingExpiresAt ? new Date(commandPendingExpiresAt).getTime() : null;
+    if (!deadline) return undefined;
+    setNow(Date.now());
+    const t = setInterval(() => {
+      const cur = Date.now();
+      setNow(cur);
+      // 倒计时归零即停，由后端超时巡检或后端 ack 来推进状态，前端不再重复 tick
+      if (cur >= deadline) {
+        clearInterval(t);
+      }
+    }, 1000);
+    return () => clearInterval(t);
+  }, [isPending, commandPendingExpiresAt]);
+
+  const remainingSeconds = useMemo(() => {
+    if (!isPending || !commandPendingExpiresAt) return null;
+    const deadline = new Date(commandPendingExpiresAt).getTime();
+    const diff = Math.max(0, Math.round((deadline - now) / 1000));
+    return diff;
+  }, [isPending, commandPendingExpiresAt, now]);
 
   const handleToggle = async () => {
     const action = isRunning ? 'stop' : 'start';
@@ -122,7 +156,14 @@ export default function AeratorControl({ pondId, status = 'stopped', mode = 'aut
         </div>
         {isPending && (
           <div style={{ fontSize: 12, color: '#faad14', marginTop: 6 }}>
-            命令已下发，正在等待设备确认，请关注现场增氧机是否实际启动
+            {lastCommandNoAck
+              ? `命令已下发，终端固件 ${deviceFirmwareVersion || '未知'} 不支持硬件回执，${FIRMWARE_NO_ACK_HINT}`
+              : '命令已下发，正在等待设备确认，请关注现场增氧机是否实际启动'}
+            {remainingSeconds !== null && (
+              <span style={{ marginLeft: 6, color: '#faad14' }}>
+                （剩余 {remainingSeconds}s）
+              </span>
+            )}
           </div>
         )}
         {isFault && (

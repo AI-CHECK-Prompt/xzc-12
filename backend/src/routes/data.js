@@ -12,7 +12,7 @@ function buildRealtimePayload(pondId, sensorData) {
   const payload = sensorData ? { ...sensorData } : {};
   return Pond.findOne({ pondId })
     .select(
-      'aeratorStatus aeratorMode commandPending lastCommand lastCommandId lastCommandTime lastCommandAckAt lastCommandFailReason aeratorStatusFault'
+      'aeratorStatus aeratorMode commandPending commandPendingExpiresAt lastCommand lastCommandId lastCommandTime lastCommandAckAt lastCommandFailReason lastCommandNoAck aeratorStatusFault deviceFirmwareVersion'
     )
     .lean()
     .then((pond) => {
@@ -20,12 +20,15 @@ function buildRealtimePayload(pondId, sensorData) {
         payload.aeratorStatus = pond.aeratorStatus;
         payload.aeratorMode = pond.aeratorMode;
         payload.commandPending = !!pond.commandPending;
+        payload.commandPendingExpiresAt = pond.commandPendingExpiresAt || null;
         payload.lastCommand = pond.lastCommand || '';
         payload.lastCommandId = pond.lastCommandId || '';
         payload.lastCommandTime = pond.lastCommandTime || null;
         payload.lastCommandAckAt = pond.lastCommandAckAt || null;
         payload.lastCommandFailReason = pond.lastCommandFailReason || '';
+        payload.lastCommandNoAck = !!pond.lastCommandNoAck;
         payload.aeratorStatusFault = !!pond.aeratorStatusFault;
+        payload.deviceFirmwareVersion = pond.deviceFirmwareVersion || '';
       }
       return payload;
     });

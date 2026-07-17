@@ -5,6 +5,7 @@ const { authMiddleware, requireOperator } = require('../middleware/auth');
 const { publishControl } = require('../services/mqttClient');
 const { broadcastAlert, broadcastDeviceStatus } = require('../services/websocket');
 const { isAlertDuplicate, markAlertSent } = require('../services/redisClient');
+const { supportsControlAck, getCommandAckTimeoutMs } = require('../utils/firmware');
 
 const router = express.Router();
 
@@ -24,6 +25,11 @@ router.post('/:pondId/aerator', authMiddleware, requireOperator, async (req, res
     }
 
     const command = action === 'on' ? 'aerator_on' : 'aerator_off';
+
+    // 终端固件能力判定：是否支持控制回执
+    // 老固件（无回执）走"短超时+乐观更新"；新固件（>=1.1.0）走"长超时+ack"
+    const hasAck = supportsControlAck(pond.deviceFirmwareVersion);
+    const ackTimeoutMs = getCommandAckTimeoutMs(pond.deviceFirmwareVersion);
 
     // 1) 先发 MQTT 命令并等待真实结果
     const pubResult = await publishControl(req.params.pondId, command);
@@ -49,15 +55,20 @@ router.post('/:pondId/aerator', authMiddleware, requireOperator, async (req, res
       }
 
       // 标记 pending 状态，前端展示"命令待确认"
+      // 注意：下发失败时仍设置短超时，便于 commandTimeoutChecker 在 5s 后清除
+      // 避免 MQTT 长期断开导致"待确认"永远停留
+      const failDeadline = new Date(Date.now() + getCommandAckTimeoutMs(pond.deviceFirmwareVersion));
       await Pond.findOneAndUpdate(
         { pondId: req.params.pondId },
         {
           $set: {
             commandPending: true,
+            commandPendingExpiresAt: failDeadline,
             lastCommand: command,
             lastCommandId: pubResult.commandId || '',
             lastCommandTime: new Date(),
-            lastCommandFailReason: pubResult.reason || 'unknown'
+            lastCommandFailReason: pubResult.reason || 'unknown',
+            lastCommandNoAck: !hasAck
           }
         }
       );
@@ -71,28 +82,32 @@ router.post('/:pondId/aerator', authMiddleware, requireOperator, async (req, res
           pondId: req.params.pondId,
           command,
           mqttSent: false,
-          reason: pubResult.reason
+          reason: pubResult.reason,
+          firmwareVersion: pond.deviceFirmwareVersion || '',
+          firmwareSupportsAck: hasAck
         }
       });
     }
 
-    // 2) 下发成功：更新 DB 标记为 pending 等待设备回执
-    // 注意：实际硬件状态由设备 ack 来确认，避免再次出现"假启动"
+    // 2) 下发成功：根据固件能力走不同状态流转
+    // - 老固件：短超时（5s）后由 commandTimeoutChecker 乐观更新 aeratorStatus
+    //   并设置 lastCommandNoAck=true，前端展示"已下发但无硬件回执，请现场确认"
+    // - 新固件：长超时（30s）内若未收到 ack，标记 fault（设备可能真故障）
+    const expiresAt = new Date(Date.now() + ackTimeoutMs);
     const update = {
       $set: {
         commandPending: true,
+        commandPendingExpiresAt: expiresAt,
         lastCommand: command,
         lastCommandId: pubResult.commandId,
         lastCommandTime: new Date(),
         lastCommandFailReason: '',
         aeratorMode: 'manual',
-        aeratorStatusFault: false
+        aeratorStatusFault: false,
+        // 老固件：标记无回执，timeout 兜底后此标记用于前端文案
+        lastCommandNoAck: !hasAck
       }
     };
-    // 关闭命令的最终结果以设备 ack 为准，但同步先更新为已请求状态
-    if (command === 'aerator_off') {
-      // 关闭命令 ack 后才会真正置 false
-    }
     await Pond.findOneAndUpdate({ pondId: req.params.pondId }, update);
 
     res.json({
@@ -103,10 +118,17 @@ router.post('/:pondId/aerator', authMiddleware, requireOperator, async (req, res
         commandId: pubResult.commandId,
         mqttSent: true,
         commandPending: true,
-        // 前端按此字段提示"命令已下发，等待设备确认"
-        message: '命令已下发到设备，请等待设备确认'
+        commandPendingExpiresAt: expiresAt.toISOString(),
+        firmwareVersion: pond.deviceFirmwareVersion || '',
+        firmwareSupportsAck: hasAck,
+        // 前端按此字段提示
+        message: hasAck
+          ? '命令已下发到设备，请等待设备确认'
+          : `命令已下发（终端固件 ${pond.deviceFirmwareVersion || '未知'} 不支持硬件回执，${Math.round(ackTimeoutMs / 1000)}s 后将自动确认状态，请现场核实）`
       },
-      message: `增氧机${action === 'on' ? '启动' : '关闭'}命令已下发，等待设备确认`
+      message: hasAck
+        ? `增氧机${action === 'on' ? '启动' : '关闭'}命令已下发，等待设备确认`
+        : `增氧机${action === 'on' ? '启动' : '关闭'}命令已下发，${Math.round(ackTimeoutMs / 1000)}s 后自动确认`
     });
   } catch (err) {
     console.error('[控制增氧机] 错误:', err.message);

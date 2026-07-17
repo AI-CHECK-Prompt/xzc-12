@@ -42,6 +42,13 @@ const pondSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
+  // 命令等待回执的截止时间（毫秒精度）。
+  // - 老固件（无回执）：setInterval 到点后乐观更新 aeratorStatus
+  // - 新固件（有回执）：超时未收到 ack 则标记 fault
+  commandPendingExpiresAt: {
+    type: Date,
+    default: null
+  },
   lastCommand: {
     type: String,
     default: ''
@@ -59,6 +66,16 @@ const pondSchema = new mongoose.Schema({
     default: null
   },
   lastCommandFailReason: {
+    type: String,
+    default: ''
+  },
+  // 标记"老固件无回执"：超时兜底已生效，前端可据此提示运维现场确认
+  lastCommandNoAck: {
+    type: Boolean,
+    default: false
+  },
+  // 终端固件版本（从 Device.firmwareVersion 同步，用于能力判定）
+  deviceFirmwareVersion: {
     type: String,
     default: ''
   },

@@ -27,6 +27,13 @@ bool publishStatus(const char* status);
 // 订阅控制命令主题
 void subscribeControl();
 
+// 发布控制回执（1.1.0 起支持）
+// commandId: 平台下发的命令 ID，必须原样回传
+// command:   "aerator_on" / "aerator_off"
+// result:    "ok" / "fail"
+// error:     失败原因（成功可为空）
+void publishControlAck(const char* commandId, const char* command, const char* result, const char* error);
+
 // 检查 MQTT 是否连接
 bool isMQTTConnected();
 

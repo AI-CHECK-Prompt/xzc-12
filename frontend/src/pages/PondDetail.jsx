@@ -7,7 +7,12 @@ import wsService from '../services/websocket';
 import RealTimeCard from '../components/RealTimeCard';
 import DataChart from '../components/DataChart';
 import AeratorControl from '../components/AeratorControl';
-import { DO_THRESHOLD_CRITICAL, DO_THRESHOLD_WARNING } from '../utils/constants';
+import {
+  DO_THRESHOLD_CRITICAL,
+  DO_THRESHOLD_WARNING,
+  FIRMWARE_ACK_SUPPORTED_HINT,
+  FIRMWARE_NO_ACK_HINT
+} from '../utils/constants';
 
 export default function PondDetailPage() {
   const { pondId } = useParams();
@@ -86,11 +91,17 @@ export default function PondDetailPage() {
 
   const handleAeratorControl = async (pid, action) => {
     try {
-      await api.controlAerator(pid, action);
-      Toast.show({ icon: 'success', content: action === 'start' ? '增氧机已开启' : '增氧机已关闭' });
+      const res = await api.controlAerator(pid, action);
+      // 后端返回的 message 已经区分"待设备确认"与"无回执超时兜底"
+      const msg = res?.message || (action === 'start' ? '增氧机已开启' : '增氧机已关闭');
+      Toast.show({ icon: 'success', content: msg });
       fetchRealtimeData();
     } catch (err) {
-      Toast.show({ icon: 'fail', content: '操作失败，请重试' });
+      // 优先展示后端 message
+      const msg = err?.response?.data?.message || '操作失败，请重试';
+      Toast.show({ icon: 'fail', content: msg });
+      // 下发失败后刷新一次以同步 lastCommandFailReason 等
+      fetchRealtimeData();
     }
   };
 
@@ -189,15 +200,17 @@ export default function PondDetailPage() {
                     // 增氧机状态展示：
                     // 优先级：commandPending=true 视为 pending（避免"假启动"误导）
                     // 其次根据 aeratorStatus 布尔或字符串
+                    // 老固件无回执时会在超时后由后端乐观更新为 running/stopped，
+                    // lastCommandNoAck 标记供文案"请现场核实"使用
                     if (data.commandPending) {
                       return <span style={{ color: '#faad14' }}>命令待确认（现场增氧机可能未启动）</span>;
+                    }
+                    if (data.aeratorStatusFault) {
+                      return <span style={{ color: '#ff4d4f' }}>故障</span>;
                     }
                     const isRunning = data.aeratorStatus === true || data.aeratorStatus === 'running';
                     if (isRunning) {
                       return <span style={{ color: '#52c41a' }}>已启动-自动模式</span>;
-                    }
-                    if (data.aeratorStatus === 'fault' || data.aeratorStatusFault) {
-                      return <span style={{ color: '#ff4d4f' }}>故障</span>;
                     }
                     return <span style={{ color: '#999' }}>已关闭</span>;
                   })()}
@@ -211,10 +224,25 @@ export default function PondDetailPage() {
                   </span>
                 </div>
               )}
+              {data.commandPending && data.commandPendingExpiresAt && (
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span>自动确认倒计时</span>
+                  <span style={{ color: '#faad14' }}>
+                    {dayjs(data.commandPendingExpiresAt).format('YYYY-MM-DD HH:mm:ss')}
+                  </span>
+                </div>
+              )}
               {data.lastCommandFailReason && data.commandPending && (
                 <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                   <span>失败原因</span>
                   <span style={{ color: '#ff4d4f' }}>{data.lastCommandFailReason}</span>
+                </div>
+              )}
+              {/* 老固件无回执：超时后状态会乐观更新，但需要提示运维现场核实 */}
+              {data.lastCommandNoAck && !data.commandPending && (
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span>回执说明</span>
+                  <span style={{ color: '#faad14', fontSize: 12 }}>无硬件回执，请现场核实</span>
                 </div>
               )}
             </div>
@@ -295,8 +323,35 @@ export default function PondDetailPage() {
                     : 'stopped'
                 }
                 mode={data.aeratorMode || 'auto'}
+                commandPendingExpiresAt={data.commandPendingExpiresAt || null}
+                lastCommandNoAck={!!data.lastCommandNoAck}
+                deviceFirmwareVersion={data.deviceFirmwareVersion || ''}
                 onControl={handleAeratorControl}
               />
+            </Card>
+
+            {/* 终端固件能力卡：让运维知道"是否支持硬件回执"以解释为何"待确认"会自动恢复 */}
+            <Card style={{ borderRadius: 12, marginTop: 12 }} bodyStyle={{ padding: '14px 16px' }}>
+              <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>终端能力</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 13, color: '#555' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span>固件版本</span>
+                  <span>{data.deviceFirmwareVersion || '未上报'}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span>硬件回执</span>
+                  <span style={{ color: data.lastCommandNoAck || !data.deviceFirmwareVersion ? '#faad14' : '#52c41a' }}>
+                    {data.lastCommandNoAck || !data.deviceFirmwareVersion
+                      ? '不支持（老固件）'
+                      : '支持'}
+                  </span>
+                </div>
+                <div style={{ fontSize: 12, color: '#999', marginTop: 4 }}>
+                  {data.lastCommandNoAck || !data.deviceFirmwareVersion
+                    ? FIRMWARE_NO_ACK_HINT
+                    : FIRMWARE_ACK_SUPPORTED_HINT}
+                </div>
+              </div>
             </Card>
 
             {pond?.devices && pond.devices.length > 0 && (
