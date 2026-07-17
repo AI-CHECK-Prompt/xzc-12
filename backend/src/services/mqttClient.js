@@ -194,14 +194,38 @@ async function handleDeviceStatus(pondId, payload) {
 
     if (pondId) {
       // 同步固件版本到 Pond，用于控制接口判定是否支持回执
-      const pondUpdate = { status: newStatus };
+      const pondUpdate = {};
       if (payload.firmwareVersion) {
         pondUpdate.deviceFirmwareVersion = payload.firmwareVersion;
       }
-      await Pond.findOneAndUpdate(
-        { pondId },
-        { $set: pondUpdate }
-      );
+
+      // 【多终端修复】设备上报 status 时，塘口状态要综合考虑同塘口其他设备的在线情况：
+      // - 任一设备上报 online → 塘口应为 online
+      // - 仅当本设备上报 offline 且同塘口无其他 online 设备时，塘口才置为 offline
+      // 避免"备用终端掉线上报 offline"把"主终端还在流数据"的塘口误标离线
+      if (newStatus === 'online') {
+        pondUpdate.status = 'online';
+      } else if (newStatus === 'offline') {
+        const DeviceModel = require('../models/Device');
+        const otherOnlineCount = await DeviceModel.countDocuments({
+          pondId,
+          status: 'online',
+          deviceId: { $ne: deviceId }
+        });
+        if (otherOnlineCount > 0) {
+          console.log(`[MQTT-状态] ${deviceId} 上报 offline，但 ${pondId} 仍有 ${otherOnlineCount} 台在线设备，塘口保持 online`);
+          // 不覆盖塘口状态
+        } else {
+          pondUpdate.status = 'offline';
+        }
+      }
+
+      if (Object.keys(pondUpdate).length > 0) {
+        await Pond.findOneAndUpdate(
+          { pondId },
+          { $set: pondUpdate }
+        );
+      }
     }
 
     broadcastDeviceStatus(pondId, newStatus);

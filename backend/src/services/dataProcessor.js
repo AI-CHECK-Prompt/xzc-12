@@ -75,7 +75,14 @@ async function processSensorData(data) {
 
     // 3. 更新设备在线状态
     if (deviceId) {
-      const device = await Device.findOneAndUpdate(
+      // 先查设备当前的 pondId，若与上报 pondId 不一致说明"设备切塘口"（典型场景：临时调试、备用顶替）
+      // 需要保留旧塘口关联：检测旧塘口是否还有其他在线设备，没有则把旧塘口置为 offline
+      // 避免"原塘口数据流被静默切断但状态仍 online"导致前端误判
+      const DeviceModel = require('../models/Device');
+      const previousDevice = await DeviceModel.findOne({ deviceId }).lean();
+      const previousPondId = previousDevice?.pondId;
+
+      const device = await DeviceModel.findOneAndUpdate(
         { deviceId },
         {
           $set: {
@@ -89,6 +96,25 @@ async function processSensorData(data) {
 
       // 更新设备最后在线时间缓存
       await setDeviceLastSeen(deviceId);
+
+      // 【多终端修复】设备切塘口：旧塘口若无其他在线设备，纠正为 offline
+      if (previousPondId && previousPondId !== pondId) {
+        const PondModel = require('../models/Pond');
+        const otherOnlineForOldPond = await DeviceModel.countDocuments({
+          pondId: previousPondId,
+          status: 'online',
+          deviceId: { $ne: deviceId }
+        });
+        if (otherOnlineForOldPond === 0) {
+          await PondModel.findOneAndUpdate(
+            { pondId: previousPondId },
+            { $set: { status: 'offline' } }
+          );
+          console.warn(`[数据处理] 设备 ${deviceId} 从 ${previousPondId} 切到 ${pondId}，旧塘口无其他在线设备，已置为 offline`);
+        } else {
+          console.log(`[数据处理] 设备 ${deviceId} 从 ${previousPondId} 切到 ${pondId}，旧塘口仍有 ${otherOnlineForOldPond} 台在线设备，保持 online`);
+        }
+      }
     }
 
     // 4. 更新塘口状态

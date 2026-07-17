@@ -165,6 +165,10 @@ async function triggerAerator(pondId) {
 // 1) Redis last_seen 缺失时回退到 MongoDB Device.lastOnline，避免"6 小时掉线但 key 过期"导致漏判
 // 2) 离线时长按真实 lastSeen 计算（不是写死阈值），并在告警 message 中展示
 // 3) 防御 lastSeen 在未来的场景（设备/服务端时钟漂移），按阈值兜底并打日志
+// 4) 【多终端】同一塘口可能关联主+备多台设备。单台设备离线时，先查同塘口其他在线设备；
+//    只有所有关联设备都离线时，才把塘口置为 offline 并发告警。
+//    解决"备用终端掉线时主终端还在流数据却被误标离线" / "主终端掉线时塘口一直显示 online" 两种状态不一致。
+// 5) 末尾加一致性兜底：扫描所有 online 塘口，若其所有设备均已 offline 则纠正为 offline（修复历史脏数据）。
 async function checkDeviceOffline() {
   try {
     const Device = require('../models/Device');
@@ -205,6 +209,21 @@ async function checkDeviceOffline() {
         );
 
         if (device.pondId) {
+          // 【多终端修复】先查同塘口其他设备是否仍在线
+          // 只更新"本设备"为 offline，不立即覆盖塘口状态
+          const otherOnlineCount = await Device.countDocuments({
+            pondId: device.pondId,
+            status: 'online',
+            deviceId: { $ne: device.deviceId }
+          });
+
+          if (otherOnlineCount > 0) {
+            console.log(`[离线检查] ${device.deviceId} 离线，但 ${device.pondId} 仍有 ${otherOnlineCount} 台在线设备（主/备），塘口保持 online，不发离线告警`);
+            // 不发离线告警、不改塘口状态，等最后一台设备也掉线时再统一处理
+            continue;
+          }
+
+          // 确认本塘口所有关联设备均已离线：标记塘口 offline 并创建告警
           await Pond.findOneAndUpdate(
             { pondId: device.pondId },
             { $set: { status: 'offline' } }
@@ -228,6 +247,24 @@ async function checkDeviceOffline() {
             console.log(`[告警] 设备离线: ${device.deviceId} (${device.pondId}) 离线 ${safeOfflineMinutes} 分钟，最后在线 ${lastSeenStr}`);
           }
         }
+      }
+    }
+
+    // 【多终端一致性兜底】扫描所有当前 online 的塘口，
+    // 若其全部关联设备均已 offline（典型场景：服务重启/历史脏数据导致状态与设备不一致），
+    // 主动纠正为 offline，保证前端展示和后端状态一致
+    const onlinePonds = await Pond.find({ status: 'online' });
+    for (const pond of onlinePonds) {
+      const hasAnyOnlineDevice = await Device.exists({
+        pondId: pond.pondId,
+        status: 'online'
+      });
+      if (!hasAnyOnlineDevice) {
+        await Pond.findOneAndUpdate(
+          { pondId: pond.pondId },
+          { $set: { status: 'offline' } }
+        );
+        console.log(`[离线检查] 兜底纠正：${pond.pondId} 无任何在线设备，但塘口状态为 online，已置为 offline`);
       }
     }
   } catch (err) {
