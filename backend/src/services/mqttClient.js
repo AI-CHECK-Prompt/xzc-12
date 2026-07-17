@@ -306,9 +306,10 @@ async function handleControlAck(pondId, payload) {
       };
       if (success) {
         // 硬件确认执行成功：以硬件回执为准设置最终状态
+        // 修复模式覆盖 bug：设备回执只能确认动作执行结果，不能改变用户设置的增氧机模式。
+        // 此前会把 manual 模式强行改为 auto，导致运维人员设置的模式丢失。
         if (command === 'aerator_on') {
           update.$set.aeratorStatus = true;
-          update.$set.aeratorMode = 'auto';
         } else if (command === 'aerator_off') {
           update.$set.aeratorStatus = false;
         }

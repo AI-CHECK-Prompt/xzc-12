@@ -51,12 +51,13 @@ async function checkPendingCommands() {
       if (noAck) {
         // 老固件无回执：MQTT 已经下发成功，乐观认为设备已执行
         // 同时保留 lastCommandNoAck=true 让前端提示"无回执请现场确认"
+        // 修复模式覆盖 bug：超时兜底只能确认动作执行结果，不能改变用户设置的增氧机模式。
+        // 此前会把 manual 模式强行改为 auto，导致运维人员设置的模式丢失。
         if (cmd === 'aerator_on') {
           update.$set.aeratorStatus = true;
         } else if (cmd === 'aerator_off') {
           update.$set.aeratorStatus = false;
         }
-        update.$set.aeratorMode = 'auto';
       } else {
         // 新固件应该回执但没回：标记 fault，让前端显示红色故障状态
         if (cmd === 'aerator_on') {

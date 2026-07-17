@@ -95,6 +95,8 @@ async function triggerAerator(pondId) {
       // 命令已下发到 broker：标记为 pending 等待设备回执
       // 真正的 running 状态由设备 ack（handleControlAck）来确认
       // 老固件 5s 后由 commandTimeoutChecker 乐观更新
+      // 修复模式覆盖 bug：aeratorMode 是用户偏好（手动/自动/关闭），不应被自动控制链路覆盖。
+      // 此前会把运维人员设置的 manual 模式强行改为 auto，导致前端模式显示异常。
       const expiresAt = new Date(Date.now() + ackTimeoutMs);
       await Pond.findOneAndUpdate(
         { pondId },
@@ -107,7 +109,7 @@ async function triggerAerator(pondId) {
             lastCommandTime: new Date(),
             lastCommandFailReason: '',
             // 暂不把 aeratorStatus 置 true，等设备 ack 成功后再置
-            aeratorMode: 'auto',
+            // 关键修复：不再覆盖 aeratorMode，保留用户设置的手动/自动/关闭模式
             aeratorStatusFault: false,
             lastCommandNoAck: !hasAck
           }
@@ -117,6 +119,7 @@ async function triggerAerator(pondId) {
     } else {
       // 下发失败：DB 不显示为已启动，但提示运维人员命令未确认
       // 仍设置短超时，避免 commandPending 一直停留
+      // 修复模式覆盖 bug：下发失败时同样不能覆盖用户设置的手动模式
       const failDeadline = new Date(Date.now() + ackTimeoutMs);
       await Pond.findOneAndUpdate(
         { pondId },
@@ -129,7 +132,7 @@ async function triggerAerator(pondId) {
             lastCommandTime: new Date(),
             lastCommandFailReason: pubResult.reason || 'unknown',
             aeratorStatus: false,
-            aeratorMode: 'auto',
+            // 关键修复：不再覆盖 aeratorMode，保留用户设置的手动/自动/关闭模式
             lastCommandNoAck: !hasAck
           }
         }
