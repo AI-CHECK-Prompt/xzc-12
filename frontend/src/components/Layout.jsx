@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { NavBar, TabBar, Badge } from 'antd-mobile';
-import { AppOutline, UnorderedListOutline } from 'antd-mobile-icons';
+import { AppOutline, UnorderedListOutline, HistogramOutline } from 'antd-mobile-icons';
 import { getUser, logout } from '../utils/auth';
 import * as api from '../services/api';
 
@@ -13,10 +13,16 @@ export default function Layout() {
 
   const tabs = [
     { key: '/', title: '首页', icon: <AppOutline /> },
+    { key: '/compare', title: '对比', icon: <HistogramOutline /> },
     { key: '/alerts', title: '告警', icon: <UnorderedListOutline />, badge: unreadCount > 0 ? Badge : null },
   ];
 
-  const activeKey = location.pathname.startsWith('/alerts') ? '/alerts' : '/';
+  // 三个 Tab 的 active 判断
+  const activeKey = location.pathname.startsWith('/alerts')
+    ? '/alerts'
+    : location.pathname.startsWith('/compare')
+      ? '/compare'
+      : '/';
 
   useEffect(() => {
     fetchUnreadCount();

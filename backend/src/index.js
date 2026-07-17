@@ -22,6 +22,7 @@ const dataRoutes = require('./routes/data');
 const alertRoutes = require('./routes/alert');
 const controlRoutes = require('./routes/control');
 const deviceRoutes = require('./routes/device');
+const analyticsRoutes = require('./routes/analytics');
 
 const app = express();
 const server = http.createServer(app);
@@ -40,6 +41,7 @@ app.use('/api/data', dataRoutes);
 app.use('/api/alerts', alertRoutes);
 app.use('/api/control', controlRoutes);
 app.use('/api/devices', deviceRoutes);
+app.use('/api/analytics', analyticsRoutes);
 
 // 健康检查
 app.get('/api/health', (req, res) => {

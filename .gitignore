@@ -104,3 +104,9 @@ docker-compose.override.yml
 *.tmp
 *.orig
 *.rej
+
+# ========== 测试产物 ==========
+test-output-*.xlsx
+test-output-*.pdf
+test-*.log
+

@@ -6,6 +6,8 @@ import DashboardPage from './pages/Dashboard';
 import PondDetailPage from './pages/PondDetail';
 import AlertListPage from './pages/AlertList';
 import DataHistoryPage from './pages/DataHistory';
+import PondComparePage from './pages/PondCompare';
+import CycleReviewPage from './pages/CycleReview';
 
 function ProtectedRoute({ children }) {
   if (!isAuthenticated()) {
@@ -31,6 +33,10 @@ export default function App() {
           <Route path="pond/:pondId" element={<PondDetailPage />} />
           <Route path="alerts" element={<AlertListPage />} />
           <Route path="history/:pondId" element={<DataHistoryPage />} />
+          {/* 塘口对比 */}
+          <Route path="compare" element={<PondComparePage />} />
+          {/* 养殖周期复盘 */}
+          <Route path="review/:pondId" element={<CycleReviewPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

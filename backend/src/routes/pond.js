@@ -52,9 +52,9 @@ router.get('/:pondId', authMiddleware, async (req, res) => {
 // POST /api/ponds - 创建塘口
 router.post('/', authMiddleware, async (req, res) => {
   try {
-    const { pondId, name, area, species, deviceId } = req.body;
+    const { pondId, name, area, species, region, deviceId } = req.body;
 
-    if (!pondId || !name || !area) {
+    if (!pondId || !name || area === undefined || area === null) {
       return res.status(400).json({ success: false, message: '塘口编号、名称和面积为必填项' });
     }
 
@@ -68,6 +68,7 @@ router.post('/', authMiddleware, async (req, res) => {
       name,
       area,
       species: species || '',
+      region: region || '',
       deviceId: deviceId || '',
       status: 'offline'
     });
@@ -84,12 +85,13 @@ router.post('/', authMiddleware, async (req, res) => {
 // PUT /api/ponds/:pondId - 更新塘口信息
 router.put('/:pondId', authMiddleware, async (req, res) => {
   try {
-    const { name, area, species, deviceId, aeratorMode } = req.body;
+    const { name, area, species, region, deviceId, aeratorMode } = req.body;
 
     const updateFields = {};
     if (name !== undefined) updateFields.name = name;
     if (area !== undefined) updateFields.area = area;
     if (species !== undefined) updateFields.species = species;
+    if (region !== undefined) updateFields.region = region;
     if (deviceId !== undefined) updateFields.deviceId = deviceId;
     if (aeratorMode !== undefined) {
       if (!['auto', 'manual', 'off'].includes(aeratorMode)) {

@@ -14,7 +14,13 @@ const pondSchema = new mongoose.Schema({
     type: Number,
     required: true
   },
+  // 养殖品种：南美白对虾 / 淡水鱼 / 加州鲈 等
   species: {
+    type: String,
+    default: ''
+  },
+  // 所属片区：用于塘口横向对比的分组维度之一
+  region: {
     type: String,
     default: ''
   },

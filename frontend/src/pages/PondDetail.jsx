@@ -230,6 +230,15 @@ export default function PondDetailPage() {
             >
               查看历史数据
             </Button>
+            <Button
+              block
+              size="small"
+              color="primary"
+              onClick={() => navigate(`/review/${pondId}`)}
+              style={{ borderRadius: 8 }}
+            >
+              周期复盘
+            </Button>
           </div>
         </Tabs.Tab>
 
