@@ -77,16 +77,20 @@ class WebSocketService {
   }
 
   dispatch(message) {
-    const { type, data } = message;
+    const { type, data, pondId } = message;
     switch (type) {
       case 'realtime_data':
-        this.callbacks.realtimeData.forEach((cb) => cb(data));
+        // 把 pondId 合并到 data 里，前端回调能直接 data.pondId 过滤
+        // 解决：旧实现只传内层 data，前端 data.pondId 永远为 undefined，
+        //       导致 Dashboard/PondDetail 的 WS 实时更新永远命中不到对应塘口
+        this.callbacks.realtimeData.forEach((cb) => cb({ pondId, ...data }));
         break;
       case 'alert':
         this.callbacks.alert.forEach((cb) => cb(data));
         break;
       case 'device_status':
-        this.callbacks.deviceStatus.forEach((cb) => cb(data));
+        // 设备状态变化同样带上 pondId
+        this.callbacks.deviceStatus.forEach((cb) => cb({ pondId, ...data }));
         break;
       default:
         console.log('[WS] 未知消息类型:', type);

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Tabs, Card, DotLoading, ErrorBlock, Button, Toast } from 'antd-mobile';
 import dayjs from 'dayjs';
@@ -14,6 +14,9 @@ import {
   FIRMWARE_NO_ACK_HINT
 } from '../utils/constants';
 
+// 详情页轮询周期（毫秒）：与列表页对齐，保证两个页面在窗口期内的数据一致
+const POLL_INTERVAL_MS = 30000;
+
 export default function PondDetailPage() {
   const { pondId } = useParams();
   const navigate = useNavigate();
@@ -22,6 +25,7 @@ export default function PondDetailPage() {
   const [historyData, setHistoryData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const pollTimerRef = useRef(null);
 
   const fetchPondDetail = useCallback(async () => {
     try {
@@ -35,7 +39,13 @@ export default function PondDetailPage() {
   const fetchRealtimeData = useCallback(async () => {
     try {
       const res = await api.getRealtimeData(pondId);
-      setRealtimeData(res?.data || res);
+      const data = res?.data || res;
+      // 兜底：万一 /api/data/:pondId/realtime 返回 null（比如 Redis 缓存被清空），
+      // 仍能用 /api/ponds/:pondId 自带的 pond.realtime 顶上，确保页面不空白。
+      setRealtimeData((prev) => {
+        if (data && Object.keys(data).length > 0) return data;
+        return prev;
+      });
     } catch {
       // ignore
     }
@@ -67,7 +77,39 @@ export default function PondDetailPage() {
       setLoading(true);
       setError(null);
       try {
-        await Promise.all([fetchPondDetail(), fetchRealtimeData(), fetchHistoryData()]);
+        // 数据源策略：详情页 DO/pH/水温 = /api/data/:pondId/realtime（控制态 + Redis 实时数据）
+        // 兜底：若 /api/data 失败，用 /api/ponds/:pondId 自带的 pond.realtime（同源 Redis）顶上
+        // 这样保证详情与列表卡片显示的数字来自同一份 Redis 快照。
+        const [detailRes, realtimeRes, historyRes] = await Promise.all([
+          api.getPondDetail(pondId).catch(() => null),
+          api.getRealtimeData(pondId).catch(() => null),
+          api.getHistoryData(pondId, {
+            startTime: dayjs().subtract(24, 'hour').toISOString(),
+            endTime: dayjs().toISOString(),
+          }).catch(() => null),
+        ]);
+
+        const pondDoc = detailRes?.data || detailRes;
+        setPond(pondDoc);
+
+        const realtimeDoc = realtimeRes?.data || realtimeRes;
+        if (realtimeDoc && Object.keys(realtimeDoc).length > 0) {
+          setRealtimeData(realtimeDoc);
+        } else if (pondDoc && pondDoc.realtime && Object.keys(pondDoc.realtime).length > 0) {
+          setRealtimeData(pondDoc.realtime);
+        } else {
+          setRealtimeData({});
+        }
+
+        const historyList = historyRes?.data || historyRes || [];
+        const list = Array.isArray(historyList) ? historyList : (historyList.list || []);
+        const chartData = list.map((item) => ({
+          time: dayjs(item.timestamp || item.time).format('HH:mm'),
+          do: item.dissolvedOxygen ?? item.do,
+          ph: item.ph,
+          temp: item.temperature ?? item.temp,
+        }));
+        setHistoryData(chartData);
       } catch {
         setError('加载数据失败');
       } finally {
@@ -75,13 +117,31 @@ export default function PondDetailPage() {
       }
     };
     load();
-  }, [fetchPondDetail, fetchRealtimeData, fetchHistoryData]);
+  }, [pondId]);
+
+  // 详情页轮询：保持与列表的实时数据"同源同频"
+  useEffect(() => {
+    pollTimerRef.current = setInterval(() => {
+      fetchRealtimeData();
+    }, POLL_INTERVAL_MS);
+    return () => {
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+    };
+  }, [fetchRealtimeData]);
 
   useEffect(() => {
     wsService.connect();
 
     const unsub = wsService.onRealtimeData((data) => {
-      if (data.pondId === pondId || data.pondId === Number(pondId)) {
+      // WS 修复后 data.pondId 才有真实值；兼容字符串/数字
+      if (
+        data.pondId === pondId ||
+        data.pondId === Number(pondId) ||
+        String(data.pondId) === String(pondId)
+      ) {
         setRealtimeData((prev) => ({ ...prev, ...data }));
       }
     });

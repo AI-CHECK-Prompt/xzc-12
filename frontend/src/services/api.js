@@ -38,15 +38,19 @@ export function getPondDetail(pondId) {
 }
 
 export function getRealtimeData(pondId) {
-  return api.get(`/ponds/${pondId}/realtime`);
+  // 修正：实时数据接口在 /api/data 下，不在 /api/ponds 下。
+  // 旧路径 /ponds/:pondId/realtime 会被路由表忽略，前端拿到 404，
+  // PondDetail 只能依赖 pond.realtime（来自 /api/ponds/:pondId 的快照），
+  // 这是"列表 5.8 / 详情 5.2"不一致的根因之一。
+  return api.get(`/data/${pondId}/realtime`);
 }
 
 export function getHistoryData(pondId, params) {
-  return api.get(`/ponds/${pondId}/history`, { params });
+  return api.get(`/data/${pondId}/history`, { params });
 }
 
 export function getLatestData(pondId) {
-  return api.get(`/ponds/${pondId}/latest`);
+  return api.get(`/data/${pondId}/latest`);
 }
 
 export function getAlerts(params) {

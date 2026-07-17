@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Card, PullToRefresh, DotLoading, ErrorBlock, NoticeBar } from 'antd-mobile';
 import dayjs from 'dayjs';
@@ -6,29 +6,35 @@ import * as api from '../services/api';
 import wsService from '../services/websocket';
 import { DO_THRESHOLD_CRITICAL, DO_THRESHOLD_WARNING } from '../utils/constants';
 
+// 列表页轮询周期（毫秒）
+// 原因：设备以 30~60s 间隔上报，列表 30s 轮询一次即可保证用户不会看到"列表旧值、详情新值"的撕裂。
+const POLL_INTERVAL_MS = 30000;
+
 export default function DashboardPage() {
   const navigate = useNavigate();
   const [ponds, setPonds] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [alertBanner, setAlertBanner] = useState(null);
+  const pollTimerRef = useRef(null);
 
   const fetchData = useCallback(async () => {
     try {
       setError(null);
       const res = await api.getPonds();
       const pondList = res?.data || res || [];
-      const pondsWithData = await Promise.all(
-        pondList.map(async (pond) => {
-          try {
-            const latestRes = await api.getLatestData(pond.id);
-            const latest = latestRes?.data || latestRes || {};
-            return { ...pond, latestData: latest };
-          } catch {
-            return { ...pond, latestData: {} };
-          }
-        })
-      );
+
+      // 数据源统一：直接采用后端 /api/ponds 返回的 pond.realtime（来自 Redis），
+      // 不再额外请求 /api/ponds/:id/latest（该路径在前端 api.js 修复前一直 404，
+      // 修复后也仍然是另一份独立数据，与详情 pond.realtime 来源/时机不同步）。
+      // 这样列表与详情都用 pond.realtime（同一份 Redis 快照）→ 数据源 + 时机一致。
+      const pondsWithData = pondList.map((pond) => {
+        // 兼容历史响应：可能没有 realtime 字段（旧版本或 Redis 缺失）
+        const realtime = pond.realtime && Object.keys(pond.realtime).length > 0
+          ? pond.realtime
+          : (pond.latestData || {});
+        return { ...pond, latestData: realtime };
+      });
       setPonds(pondsWithData);
     } catch (err) {
       setError('加载塘口数据失败');
@@ -42,13 +48,45 @@ export default function DashboardPage() {
     fetchUnreadAlerts();
   }, [fetchData]);
 
+  // 轮询拉取，保证列表数据不会长时间滞后于详情
+  useEffect(() => {
+    pollTimerRef.current = setInterval(() => {
+      fetchData();
+    }, POLL_INTERVAL_MS);
+    return () => {
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+    };
+  }, [fetchData]);
+
+  // 用户从详情页返回列表时立即刷新一次（visibilitychange / pageshow）
+  useEffect(() => {
+    const handleVisible = () => {
+      if (document.visibilityState === 'visible') {
+        fetchData();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisible);
+    window.addEventListener('pageshow', handleVisible);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisible);
+      window.removeEventListener('pageshow', handleVisible);
+    };
+  }, [fetchData]);
+
   useEffect(() => {
     wsService.connect();
 
     const unsub1 = wsService.onRealtimeData((data) => {
+      // WS 修复后 data.pondId 才会有值，过滤命中目标塘口
+      // 兼容 pondId 可能是字符串/数字
+      const targetPondId = data.pondId;
+      if (targetPondId === undefined || targetPondId === null) return;
       setPonds((prev) =>
         prev.map((pond) => {
-          if (pond.id === data.pondId) {
+          if (pond.pondId === targetPondId || String(pond.pondId) === String(targetPondId)) {
             return { ...pond, latestData: { ...pond.latestData, ...data } };
           }
           return pond;
@@ -141,13 +179,19 @@ export default function DashboardPage() {
             const doVal = data.dissolvedOxygen ?? data.do;
             const phVal = data.ph;
             const tempVal = data.temperature ?? data.temp;
-            const aeratorRunning = data.aeratorStatus === 'running';
+            // 增氧机状态兼容：布尔/字符串均识别，与 PondDetail 保持一致
+            const aeratorRunning =
+              data.aeratorStatus === true ||
+              data.aeratorStatus === 'running' ||
+              data.aeratorStatus === 'true';
             const updateTime = data.updatedAt || data.timestamp;
+            // 业务主键使用 pondId，不要用 MongoDB _id
+            const pondKey = pond.pondId || pond.id;
 
             return (
               <Card
-                key={pond.id}
-                onClick={() => navigate(`/pond/${pond.id}`)}
+                key={pondKey}
+                onClick={() => navigate(`/pond/${pondKey}`)}
                 style={{ borderRadius: 12, cursor: 'pointer' }}
                 bodyStyle={{ padding: '14px 16px' }}
               >
