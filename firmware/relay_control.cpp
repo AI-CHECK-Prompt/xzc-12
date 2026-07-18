@@ -62,7 +62,13 @@ void turnAeratorOff() {
     Serial.println(F("【继电器】增氧机已关闭"));
 }
 
-// 获取增氧机当前状态
+// 获取增氧机当前状态（固件内部记录的目标值）
 bool getAeratorStatus() {
-    return aeratorStatus;
+  return aeratorStatus;
+}
+
+// 读回 GPIO 实际电平（继电器输出端）
+// ESP32 在 OUTPUT 模式下 digitalRead 读回的是输出寄存器的值，即实际拉高的电平
+bool getAeratorActualStatus() {
+  return digitalRead(AERATOR_RELAY) == HIGH;
 }

@@ -16,7 +16,7 @@ function parseSensorValue(value) {
 // 处理传感器数据
 async function processSensorData(data) {
   try {
-    const { pondId, deviceId, temperature, ph, dissolvedOxygen, timestamp } = data;
+    const { pondId, deviceId, temperature, ph, dissolvedOxygen, timestamp, aeratorStatus } = data;
 
     if (!pondId) {
       console.error('[数据处理] 缺少 pondId，跳过');
@@ -79,7 +79,7 @@ async function processSensorData(data) {
       // 需要保留旧塘口关联：检测旧塘口是否还有其他在线设备，没有则把旧塘口置为 offline
       // 避免"原塘口数据流被静默切断但状态仍 online"导致前端误判
       const DeviceModel = require('../models/Device');
-      const previousDevice = await DeviceModel.findOne({ deviceId }).lean();
+      const previousDevice = await DeviceModel.findOne({ deviceId });
       const previousPondId = previousDevice?.pondId;
 
       const device = await DeviceModel.findOneAndUpdate(
@@ -122,6 +122,20 @@ async function processSensorData(data) {
       { pondId },
       { $set: { status: 'online' } }
     );
+
+    // 4.1 同步 aeratorStatus：data payload 现在携带该字段
+    // 仅在不一致时写 DB，避免每次 5 分钟上报都触发更新
+    // 不清 commandPending：保留命令回执的状态机完整性
+    if (typeof aeratorStatus === 'boolean') {
+      const cur = await Pond.findOne({ pondId });
+      if (cur && cur.aeratorStatus !== aeratorStatus) {
+        await Pond.findOneAndUpdate(
+          { pondId },
+          { $set: { aeratorStatus } }
+        );
+        console.log(`[数据处理] ${pondId} data 同步 aeratorStatus: ${cur.aeratorStatus} -> ${aeratorStatus}`);
+      }
+    }
 
     // 5. 调用告警引擎检查阈值
     // 修复：把设备真实检测时间（sensorData.timestamp）透传到告警引擎，

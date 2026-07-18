@@ -29,6 +29,13 @@ unsigned long lastReportTime = 0;
 // 看门狗重置时间
 unsigned long lastWatchdogReset = 0;
 
+// 增氧机状态巡检定时器
+// 修复：定期读回 GPIO 实际电平，与固件内部目标值比对，
+//       不一致时主动 publish 状态事件，平台后端据此同步 Pond.aeratorStatus
+//       解决"现场人工拉闸后前端一直显示旧值"问题
+unsigned long lastAeratorCheckTime = 0;
+#define AERATOR_CHECK_INTERVAL 5000  // 5 秒巡检一次，平衡流量与响应速度
+
 // ==================== 数据缓冲区 ====================
 
 // 采集数据缓冲区（用于上报时取平均值）
@@ -156,7 +163,14 @@ void loop() {
     
     // 检查是否需要补传缓存数据
     checkAndUploadCache();
-    
+
+    // 检查增氧机状态是否与内部记录一致
+    // 不一致时（如继电器被外部信号拉低/接触器辅助点异常）主动 publish 事件
+    if (now - lastAeratorCheckTime >= AERATOR_CHECK_INTERVAL) {
+        lastAeratorCheckTime = now;
+        checkAeratorState();
+    }
+
     // 短暂延时，避免 CPU 占用过高
     delay(100);
 }
@@ -287,4 +301,20 @@ void checkAndUploadCache() {
 void resetWatchdog() {
     // 使用 ESP32 任务看门狗
     esp_task_wdt_reset();
+}
+
+// ==================== 增氧机状态巡检 ====================
+
+// 巡检增氧机真实状态：GPIO 实际电平 vs 固件内部目标值
+// 不一致时主动 publish 状态事件，让平台后端同步 Pond.aeratorStatus
+// 解决"现场人工拉闸 / 接触器异常 / 设备掉电重启"等场景下前端状态滞留问题
+void checkAeratorState() {
+    bool target = getAeratorStatus();
+    bool actual = getAeratorActualStatus();
+
+    if (target != actual) {
+        Serial.printf("【增氧机巡检】目标=%s 实际=%s 不一致，发布状态事件\n",
+                      target ? "on" : "off", actual ? "on" : "off");
+        publishAeratorStateEvent(actual, "gpio_mismatch");
+    }
 }

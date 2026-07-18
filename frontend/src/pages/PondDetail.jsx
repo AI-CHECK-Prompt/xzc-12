@@ -143,11 +143,35 @@ export default function PondDetailPage() {
         String(data.pondId) === String(pondId)
       ) {
         setRealtimeData((prev) => ({ ...prev, ...data }));
+        // 修复：固件 /data payload 现在携带 aeratorStatus 字段（设备读回 GPIO 实际电平）
+        // 现场人工拉闸后 5 秒内会被 publishAeratorStateEvent 立即同步，
+        // 30s 上报周期是兜底；这里同步到 pond 状态用于实时刷新 UI
+        if (typeof data.aeratorStatus === 'boolean') {
+          setPond((prev) => (prev ? { ...prev, aeratorStatus: data.aeratorStatus } : prev));
+        }
       }
     });
 
-    return () => unsub();
-  }, [pondId]);
+    // 修复：监听设备状态变化广播（aerator_state_changed / status / ack），
+    // 现场人工操作时固件 5s 内发布事件，后端广播后前端立即拉取最新 pond 状态
+    const unsubStatus = wsService.onDeviceStatus((data) => {
+      if (
+        data.pondId !== pondId &&
+        data.pondId !== Number(pondId) &&
+        String(data.pondId) !== String(pondId)
+      ) {
+        return;
+      }
+      // 触发任意设备状态变化时，重新拉取 pond 详情以获取最新 aeratorStatus/pending/fault
+      // 简单可靠，避免在前端维护额外的状态合并逻辑
+      fetchPondDetail();
+    });
+
+    return () => {
+      unsub();
+      unsubStatus();
+    };
+  }, [pondId, fetchPondDetail]);
 
   const handleAeratorControl = async (pid, action) => {
     try {

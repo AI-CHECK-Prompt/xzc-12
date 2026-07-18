@@ -34,6 +34,12 @@ void subscribeControl();
 // error:     失败原因（成功可为空）
 void publishControlAck(const char* commandId, const char* command, const char* result, const char* error);
 
+// 发布增氧机被动状态变化事件
+// 触发场景：固件巡检发现 GPIO 实际电平与内部记录的目标值不一致时调用
+// 平台后端据此把 Pond.aeratorStatus 同步到设备真实状态（与"命令下行触发"的更新路径解耦）
+// reason: "gpio_mismatch" / "manual_switch" / "power_loss" 等，便于平台归类
+void publishAeratorStateEvent(bool actualStatus, const char* reason);
+
 // 检查 MQTT 是否连接
 bool isMQTTConnected();
 

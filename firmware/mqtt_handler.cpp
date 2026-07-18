@@ -8,10 +8,11 @@ WiFiClient wifiClient;
 PubSubClient mqttClient(wifiClient);
 
 // MQTT 主题定义
-#define TOPIC_DATA        "pond/" POND_ID "/data"
-#define TOPIC_STATUS      "pond/" POND_ID "/status"
-#define TOPIC_CONTROL     "pond/" POND_ID "/control"
-#define TOPIC_CONTROL_ACK "pond/" POND_ID "/control/ack"
+#define TOPIC_DATA           "pond/" POND_ID "/data"
+#define TOPIC_STATUS         "pond/" POND_ID "/status"
+#define TOPIC_CONTROL        "pond/" POND_ID "/control"
+#define TOPIC_CONTROL_ACK    "pond/" POND_ID "/control/ack"
+#define TOPIC_AERATOR_EVENT  "pond/" POND_ID "/event/aerator_state"
 
 // 最后心跳时间
 unsigned long lastHeartbeat = 0;
@@ -110,10 +111,15 @@ bool publishData(SensorData data) {
     snprintf(timestamp, sizeof(timestamp), "2026-01-01T%02lu:%02lu:%02luZ", hours, mins, sec);
     
     // 构建 JSON 数据
-    char payload[512];
+    // 修复：payload 增加 aeratorStatus 字段，平台后端据此把 Pond.aeratorStatus
+    // 同步到设备真实状态。说明：digitalRead 在 OUTPUT 模式下读回的是输出寄存器的值，
+    // 反映继电器输出端电平；如人工拉下接触器后端空气开关，此字段仍为 HIGH。
+    char payload[640];
     snprintf(payload, sizeof(payload),
-             "{\"pondId\":\"%s\",\"deviceId\":\"%s\",\"temperature\":%.1f,\"ph\":%.2f,\"dissolvedOxygen\":%.2f,\"timestamp\":\"%s\"}",
-             POND_ID, DEVICE_ID, data.temperature, data.ph, data.dissolvedOxygen, timestamp);
+             "{\"pondId\":\"%s\",\"deviceId\":\"%s\",\"temperature\":%.1f,\"ph\":%.2f,\"dissolvedOxygen\":%.2f,\"aeratorStatus\":%s,\"timestamp\":\"%s\"}",
+             POND_ID, DEVICE_ID, data.temperature, data.ph, data.dissolvedOxygen,
+             getAeratorActualStatus() ? "true" : "false",
+             timestamp);
     
     bool result = mqttClient.publish(TOPIC_DATA, payload);
     
@@ -139,10 +145,11 @@ bool publishStatus(const char* status) {
     // 获取可用堆内存
     uint32_t freeHeap = ESP.getFreeHeap();
     
-    char payload[256];
+    char payload[384];
     snprintf(payload, sizeof(payload),
-             "{\"deviceId\":\"%s\",\"status\":\"%s\",\"firmwareVersion\":\"%s\",\"rssi\":%d,\"freeHeap\":%u}",
-             DEVICE_ID, status, FIRMWARE_VERSION, rssi, freeHeap);
+             "{\"deviceId\":\"%s\",\"status\":\"%s\",\"firmwareVersion\":\"%s\",\"rssi\":%d,\"freeHeap\":%u,\"aeratorStatus\":%s}",
+             DEVICE_ID, status, FIRMWARE_VERSION, rssi, freeHeap,
+             getAeratorActualStatus() ? "true" : "false");
     
     bool result = mqttClient.publish(TOPIC_STATUS, payload);
     
@@ -188,6 +195,33 @@ void publishControlAck(const char* commandId, const char* command, const char* r
         Serial.printf("【MQTT】控制回执已发送: commandId=%s command=%s result=%s\n", commandId, command, result);
     } else {
         Serial.println(F("【MQTT】控制回执发送失败"));
+    }
+}
+
+// 发布增氧机被动状态变化事件
+// 触发：固件巡检（loop 中）发现 digitalRead 与内部 aeratorStatus 不一致时
+// 目的：让平台 Pond.aeratorStatus 与设备真实继电器输出电平保持一致，
+//       解决"现场拉闸后前端一直显示旧值"问题
+// 注：物理旁路（接触器后端被短接）仍无法感知，需配合硬件反馈脚
+void publishAeratorStateEvent(bool actualStatus, const char* reason) {
+    if (!mqttClient.connected()) {
+        Serial.println(F("【MQTT】未连接，无法发送增氧机状态事件"));
+        return;
+    }
+    const char* safeReason = (reason && reason[0]) ? reason : "unknown";
+    char payload[256];
+    snprintf(payload, sizeof(payload),
+             "{\"deviceId\":\"%s\",\"aeratorStatus\":%s,\"reason\":\"%s\",\"timestamp\":\"%s\"}",
+             DEVICE_ID,
+             actualStatus ? "true" : "false",
+             safeReason,
+             "2026-01-01T00:00:00Z");
+    bool ok = mqttClient.publish(TOPIC_AERATOR_EVENT, payload, 1);
+    if (ok) {
+        Serial.printf("【MQTT】增氧机状态事件已发送: actual=%s reason=%s\n",
+                      actualStatus ? "true" : "false", safeReason);
+    } else {
+        Serial.println(F("【MQTT】增氧机状态事件发送失败"));
     }
 }
 

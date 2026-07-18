@@ -53,6 +53,17 @@ function initMqttClient() {
         }
       });
 
+      // 订阅增氧机被动状态事件 topic
+      // 场景：固件巡检发现 GPIO 实际电平与内部目标值不一致时主动发布
+      // 用于解决"现场人工拉闸后前端一直显示旧值"问题
+      client.subscribe('pond/+/event/aerator_state', { qos: 1 }, (err) => {
+        if (err) {
+          console.error('[MQTT] 订阅 pond/+/event/aerator_state 失败:', err.message);
+        } else {
+          console.log('[MQTT] 已订阅 pond/+/event/aerator_state');
+        }
+      });
+
       resolve(client);
     });
 
@@ -76,6 +87,9 @@ function initMqttClient() {
         } else if (topic.endsWith('/control/ack')) {
           // 控制回执
           handleControlAck(pondId, payload);
+        } else if (topic.endsWith('/event/aerator_state')) {
+          // 增氧机被动状态事件
+          handleAeratorStateEvent(pondId, payload);
         }
       } catch (err) {
         console.error('[MQTT] 消息解析失败:', err.message, 'topic:', topic);
@@ -232,8 +246,114 @@ async function handleDeviceStatus(pondId, payload) {
     }
 
     broadcastDeviceStatus(pondId, newStatus);
+
+    // 修复：status payload 现在携带 aeratorStatus 字段（固件读回 GPIO 实际电平）
+    // 当设备主动上报的 aeratorStatus 与 DB 不一致时，同步到 Pond
+    // 场景：现场人工拉闸后固件巡检会 publish 事件立即同步；
+    //       status 报告（30s 一次）兜底，保证事件丢失时仍能在心跳周期内对齐
+    //
+    // 不清 pending：保留命令回执路径的状态机完整性。
+    // pending 期间 status 报告的 aeratorStatus 不同步，让命令回执/超时兜底独占状态机；
+    // 真正的"现场操作覆盖"由 handleAeratorStateEvent 主动事件负责（它会清 pending）。
+    if (typeof payload.aeratorStatus === 'boolean' && pondId) {
+      try {
+        const PondModel = require('../models/Pond');
+        const cur = await PondModel.findOne({ pondId });
+        // pending 期间不同步 status 报告：让命令回执路径独占
+        if (cur && !cur.commandPending && cur.aeratorStatus !== payload.aeratorStatus) {
+          await PondModel.findOneAndUpdate(
+            { pondId },
+            { $set: { aeratorStatus: payload.aeratorStatus } }
+          );
+          console.log(`[MQTT-状态] ${pondId} 心跳同步 aeratorStatus: ${cur.aeratorStatus} -> ${payload.aeratorStatus}`);
+        }
+      } catch (e) {
+        console.error('[MQTT-状态] 同步 aeratorStatus 失败:', e.message);
+      }
+    }
   } catch (err) {
     console.error('[MQTT] 处理设备状态失败:', err.message);
+  }
+}
+
+// 处理增氧机被动状态事件
+// 触发：固件巡检（loop 中）发现 digitalRead 与内部 aeratorStatus 不一致时主动发布
+// 目的：把平台 Pond.aeratorStatus 同步到设备真实继电器输出电平
+// 解决"现场人工拉闸 / 接触器异常 / 设备掉电重启"等场景下前端状态滞留
+//
+// race-condition 处理：
+// - 如果当前 commandPending=true（刚刚下发命令但还没收到 ack），
+//   被动事件说明现场已发生变化，应直接清掉 pending 并同步真实状态，
+//   避免命令回执回来后覆盖真实状态。
+// - 通过 lastCommandTime 限流：避免固件在 RELAY_COOLDOWN 期间重复 publish 风暴
+async function handleAeratorStateEvent(pondId, payload) {
+  try {
+    const { deviceId, aeratorStatus, reason } = payload || {};
+    if (!pondId) return;
+    if (typeof aeratorStatus !== 'boolean') {
+      console.warn(`[MQTT-增氧机事件] ${pondId} payload 缺少 aeratorStatus 字段，已忽略`);
+      return;
+    }
+
+    const Pond = require('../models/Pond');
+    const Alert = require('../models/Alert');
+    const { isAlertDuplicate, markAlertSent } = require('./redisClient');
+    const { broadcastDeviceStatus } = require('./websocket');
+
+    const pond = await Pond.findOne({ pondId });
+    if (!pond) {
+      console.warn(`[MQTT-增氧机事件] 塘口不存在: ${pondId}`);
+      return;
+    }
+
+    // 仅在状态真正变化时同步，避免每次 publish 都写 DB
+    if (pond.aeratorStatus === aeratorStatus && !pond.commandPending) {
+      console.log(`[MQTT-增氧机事件] ${pondId} aeratorStatus=${aeratorStatus} 与 DB 一致，跳过`);
+      return;
+    }
+
+    const wasPending = !!pond.commandPending;
+    const oldStatus = pond.aeratorStatus;
+    const update = {
+      $set: {
+        aeratorStatus,
+        // 被动事件说明真实状态已变，清掉 pending 与 fault，
+        // 避免"命令待确认"的橙色提示长期停留
+        commandPending: false,
+        commandPendingExpiresAt: null,
+        aeratorStatusFault: false
+      }
+    };
+
+    await Pond.findOneAndUpdate({ pondId }, update);
+    broadcastDeviceStatus(pondId, 'aerator_state_changed');
+
+    console.log(
+      `[MQTT-增氧机事件] ${pondId} aeratorStatus: ${oldStatus} -> ${aeratorStatus} ` +
+      `(reason=${reason || 'unknown'}, pending=${wasPending}, deviceId=${deviceId || 'unknown'})`
+    );
+
+    // 如果此前在等待命令回执，现场操作覆盖了命令结果，记录 warning 告警（去重）
+    if (wasPending) {
+      const dup = await isAlertDuplicate(pondId, 'aerator_state_mismatch');
+      if (!dup) {
+        const alert = new Alert({
+          pondId,
+          type: 'aerator_state_mismatch',
+          level: 'warning',
+          value: aeratorStatus ? 1 : 0,
+          threshold: 0,
+          message: `塘口增氧机状态被现场操作改变：${oldStatus ? '运行中' : '已停止'} → ${aeratorStatus ? '运行中' : '已停止'}（reason=${reason || 'unknown'}）`,
+          detectedAt: new Date()
+        });
+        await alert.save();
+        await markAlertSent(pondId, 'aerator_state_mismatch');
+        const { broadcastAlert } = require('./websocket');
+        broadcastAlert(alert.toObject());
+      }
+    }
+  } catch (err) {
+    console.error('[MQTT] 处理增氧机状态事件失败:', err.message);
   }
 }
 
@@ -369,4 +489,12 @@ function isConnected() {
   return connected;
 }
 
-module.exports = { initMqttClient, publishControl, handleControlAck, getClient, isConnected };
+module.exports = {
+  initMqttClient,
+  publishControl,
+  handleControlAck,
+  handleDeviceStatus,
+  handleAeratorStateEvent,
+  getClient,
+  isConnected
+};
