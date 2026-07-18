@@ -198,7 +198,12 @@ export default function AlertListPage() {
               </div>
               <div style={{ fontSize: 12, color: '#333', marginBottom: 4 }}>{alert.message}</div>
               <div style={{ fontSize: 11, color: '#bbb' }}>
-                {alert.createdAt || alert.timestamp ? dayjs(alert.createdAt || alert.timestamp).format('MM-DD HH:mm:ss') : ''}
+                {(() => {
+                  // 修复：优先使用 detectedAt（设备真实检测时间），缺失时回退到 createdAt
+                  // 解决"运维现场处理时间早于平台告警时间"的时序错乱问题
+                  const displayTime = alert.detectedAt || alert.createdAt || alert.timestamp;
+                  return displayTime ? dayjs(displayTime).format('YYYY-MM-DD HH:mm:ss') : '';
+                })()}
               </div>
             </List.Item>
           );

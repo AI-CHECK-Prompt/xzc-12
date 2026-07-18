@@ -320,8 +320,20 @@ router.get('/cycle-review', authMiddleware, async (req, res) => {
     const overview = await aggregatePond(pond, start, end);
 
     // 2) 告警统计分布
+    // 修复：按 detectedAt（设备真实检测时间）过滤，老数据无 detectedAt 时回退到 createdAt，
+    // 解决"事件复盘时序错乱"——按入库时间筛会把告警归到错误周期
     const alertAgg = await Alert.aggregate([
-      { $match: { pondId, createdAt: { $gte: start, $lte: end } } },
+      {
+        $match: {
+          pondId,
+          $expr: {
+            $and: [
+              { $gte: [{ $ifNull: ['$detectedAt', '$createdAt'] }, start] },
+              { $lte: [{ $ifNull: ['$detectedAt', '$createdAt'] }, end] }
+            ]
+          }
+        }
+      },
       {
         $group: {
           _id: { type: '$type', level: '$level' },
@@ -570,8 +582,17 @@ router.get('/cycle-review/export', authMiddleware, async (req, res) => {
 
     const [overview, alertDocs, trend] = await Promise.all([
       aggregatePond(pond, start, end),
-      Alert.find({ pondId, createdAt: { $gte: start, $lte: end } })
-        .sort({ createdAt: -1 })
+      // 修复：按 detectedAt 过滤+排序，缺失时回退到 createdAt，保证事件复盘时序与平台列表一致
+      Alert.find({
+        pondId,
+        $expr: {
+          $and: [
+            { $gte: [{ $ifNull: ['$detectedAt', '$createdAt'] }, start] },
+            { $lte: [{ $ifNull: ['$detectedAt', '$createdAt'] }, end] }
+          ]
+        }
+      })
+        .sort({ detectedAt: -1, createdAt: -1 })
         .lean(),
       SensorData.find({ pondId, timestamp: { $gte: start, $lte: end } })
         .select('temperature ph dissolvedOxygen timestamp')
@@ -682,8 +703,11 @@ async function exportExcel(res, ctx, filename) {
     { header: '描述', key: 'msg', width: 50 }
   ];
   alertDocs.forEach((a) => {
+    // 修复：导出时间使用 detectedAt（设备真实检测时间），缺失时回退 createdAt，
+    // 保证导出报告与平台告警列表时序一致
+    const t = a.detectedAt || a.createdAt;
     ws3.addRow({
-      t: new Date(a.createdAt).toLocaleString('zh-CN'),
+      t: new Date(t).toLocaleString('zh-CN'),
       type: a.type,
       level: a.level,
       val: a.value,
@@ -747,7 +771,9 @@ async function exportPdf(res, ctx, filename) {
   doc.moveDown(0.5);
   // 详细告警最多列前 30 条
   alertDocs.slice(0, 30).forEach((a) => {
-    doc.text(`- ${new Date(a.createdAt).toLocaleString('zh-CN')}  [${a.level}]  ${a.type}  value=${a.value}  ${a.message || ''}`);
+    // 修复：PDF 报告时间使用 detectedAt，与平台告警列表/Excel 保持一致
+    const t = a.detectedAt || a.createdAt;
+    doc.text(`- ${new Date(t).toLocaleString('zh-CN')}  [${a.level}]  ${a.type}  value=${a.value}  ${a.message || ''}`);
   });
   if (alertDocs.length > 30) {
     doc.text(`... and ${alertDocs.length - 30} more (see Excel export for full list)`);

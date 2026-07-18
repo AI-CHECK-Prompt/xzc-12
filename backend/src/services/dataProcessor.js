@@ -124,12 +124,15 @@ async function processSensorData(data) {
     );
 
     // 5. 调用告警引擎检查阈值
+    // 修复：把设备真实检测时间（sensorData.timestamp）透传到告警引擎，
+    // 避免告警入库时间比设备检测时间晚 3-5 秒，导致运维人员现场处理时间早于平台告警时间
     const alertEngine = require('./alertEngine');
     await alertEngine.checkThresholds({
       pondId,
       temperature: sensorData.temperature,
       ph: sensorData.ph,
-      dissolvedOxygen: sensorData.dissolvedOxygen
+      dissolvedOxygen: sensorData.dissolvedOxygen,
+      detectedAt: sensorData.timestamp
     });
 
     // 6. 通过 WebSocket 广播实时数据

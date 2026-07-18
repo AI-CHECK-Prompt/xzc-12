@@ -158,7 +158,10 @@ async function handleDeviceStatus(pondId, payload) {
                   level: 'critical',
                   value: safeOfflineMinutes,
                   threshold: config.deviceOfflineMinutes,
-                  message: `设备 ${deviceId} 已离线 ${safeOfflineMinutes} 分钟（最后在线：${lastSeenStr}）`
+                  message: `设备 ${deviceId} 已离线 ${safeOfflineMinutes} 分钟（最后在线：${lastSeenStr}）`,
+                  // 修复：告警时间应为设备真实离线时刻（lastSeen），
+                  // 而非重连/入库时间（now），避免"运维人员发现时已晚于告警时间"
+                  detectedAt: new Date(lastSeenMs)
                 });
                 await alert.save();
                 await markAlertSent(targetPondId, 'device_offline');

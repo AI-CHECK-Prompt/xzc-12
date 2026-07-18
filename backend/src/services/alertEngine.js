@@ -7,19 +7,20 @@ const { publishControl } = require('./mqttClient');
 const { supportsControlAck, getCommandAckTimeoutMs } = require('../utils/firmware');
 
 // 检查传感器数据是否触发告警
+// detectedAt: 设备真实检测时间（来自 SensorData.timestamp），用于修正入库时间偏差
 async function checkThresholds(data) {
-  const { pondId, temperature, ph, dissolvedOxygen } = data;
+  const { pondId, temperature, ph, dissolvedOxygen, detectedAt } = data;
   const thresholds = config.thresholds;
 
   // 检查溶氧
   if (dissolvedOxygen !== undefined && dissolvedOxygen !== null) {
     if (dissolvedOxygen < thresholds.dissolvedOxygen.critical) {
       await createAlert(pondId, 'low_oxygen', 'critical', dissolvedOxygen,
-        thresholds.dissolvedOxygen.critical, '溶氧过低，增氧机已自动启动');
-      await triggerAerator(pondId);
+        thresholds.dissolvedOxygen.critical, '溶氧过低，增氧机已自动启动', detectedAt);
+      await triggerAerator(pondId, detectedAt);
     } else if (dissolvedOxygen < thresholds.dissolvedOxygen.warning) {
       await createAlert(pondId, 'low_oxygen', 'warning', dissolvedOxygen,
-        thresholds.dissolvedOxygen.warning, '溶氧偏低，请关注');
+        thresholds.dissolvedOxygen.warning, '溶氧偏低，请关注', detectedAt);
     }
   }
 
@@ -27,10 +28,10 @@ async function checkThresholds(data) {
   if (ph !== undefined && ph !== null) {
     if (ph < thresholds.ph.low) {
       await createAlert(pondId, 'low_ph', 'critical', ph,
-        thresholds.ph.low, 'pH值过低，请立即处理');
+        thresholds.ph.low, 'pH值过低，请立即处理', detectedAt);
     } else if (ph > thresholds.ph.high) {
       await createAlert(pondId, 'high_ph', 'critical', ph,
-        thresholds.ph.high, 'pH值过高，请立即处理');
+        thresholds.ph.high, 'pH值过高，请立即处理', detectedAt);
     }
   }
 
@@ -38,18 +39,28 @@ async function checkThresholds(data) {
   if (temperature !== undefined && temperature !== null) {
     if (temperature > thresholds.temperature.high) {
       await createAlert(pondId, 'high_temperature', 'warning', temperature,
-        thresholds.temperature.high, '水温过高，请关注');
+        thresholds.temperature.high, '水温过高，请关注', detectedAt);
     }
   }
 }
 
 // 创建告警（带去重）
-async function createAlert(pondId, type, level, value, threshold, message) {
+// detectedAt: 告警实际发生的时刻（设备检测时间）。未传则使用服务端当前时间作为兜底，
+// 保证新字段缺失时不会写入 null 导致前端展示异常
+async function createAlert(pondId, type, level, value, threshold, message, detectedAt) {
   try {
     // 检查是否在去重窗口内
     const isDuplicate = await isAlertDuplicate(pondId, type);
     if (isDuplicate) {
       return null;
+    }
+
+    // 兜底：若调用方没传 detectedAt（例如离线告警以外的旧调用点），使用 new Date()，
+    // 与 createdAt 保持一致，避免显示 null
+    const detectedAtDate = detectedAt ? new Date(detectedAt) : new Date();
+    if (detectedAt && Number.isNaN(detectedAtDate.getTime())) {
+      // 非法时间戳：兜底为当前时间
+      console.warn(`[告警] ${pondId} - ${type} detectedAt 非法(${detectedAt})，回退为当前时间`);
     }
 
     const alert = new Alert({
@@ -58,7 +69,8 @@ async function createAlert(pondId, type, level, value, threshold, message) {
       level,
       value,
       threshold,
-      message
+      message,
+      detectedAt: Number.isNaN(detectedAtDate.getTime()) ? new Date() : detectedAtDate
     });
 
     await alert.save();
@@ -81,7 +93,8 @@ async function createAlert(pondId, type, level, value, threshold, message) {
 // 修复"假启动"：先发 MQTT 并等待 broker ack，仅在命令确实下发到 broker 时才将
 // 状态置为 running；下发失败时只标记 pending 状态，DB 不显示为"已启动"
 // 同时设置 commandPendingExpiresAt，老固件 5s/新固件 30s 后由 commandTimeoutChecker 兜底
-async function triggerAerator(pondId) {
+// detectedAt: 设备检测到溶氧过低的真实时间，用于命令失败告警的"告警时间"修正
+async function triggerAerator(pondId, detectedAt) {
   try {
     // 先查塘口以读取固件版本，决定超时与是否标记无回执
     const pondDoc = await Pond.findOne({ pondId });
@@ -148,7 +161,9 @@ async function triggerAerator(pondId) {
           level: 'critical',
           value: 0,
           threshold: 0,
-          message: `增氧机自动启动命令下发失败（${pubResult.reason}），请检查 MQTT/网络/设备，鱼虾存在缺氧风险`
+          message: `增氧机自动启动命令下发失败（${pubResult.reason}），请检查 MQTT/网络/设备，鱼虾存在缺氧风险`,
+          // 与阈值告警保持一致：使用设备检测时间，避免入库链路延迟被算作告警时间
+          detectedAt: detectedAt ? new Date(detectedAt) : new Date()
         });
         await alert.save();
         await markAlertSent(pondId, 'aerator_command_failed');
@@ -239,7 +254,10 @@ async function checkDeviceOffline() {
               level: 'critical',
               value: safeOfflineMinutes,
               threshold: config.deviceOfflineMinutes,
-              message: `设备 ${device.deviceId} 已离线 ${safeOfflineMinutes} 分钟（最后在线：${lastSeenStr}）`
+              message: `设备 ${device.deviceId} 已离线 ${safeOfflineMinutes} 分钟（最后在线：${lastSeenStr}）`,
+              // 修复：告警时间应使用 lastSeen 真实离线时刻，
+              // 否则定时器发现离线的时刻会被人为推迟 0-数分钟（取决于定时器轮询间隔）
+              detectedAt: new Date(lastSeenMs)
             });
             await alert.save();
             await markAlertSent(device.pondId, 'device_offline');

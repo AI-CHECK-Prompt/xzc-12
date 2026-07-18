@@ -27,8 +27,10 @@ router.get('/', authMiddleware, async (req, res) => {
     }
 
     const total = await Alert.countDocuments(query);
+    // 修复：按 detectedAt（设备真实检测时间）倒序展示，
+    // 缺失 detectedAt 的历史告警回退到 createdAt，不影响排序稳定性
     const alerts = await Alert.find(query)
-      .sort({ createdAt: -1 })
+      .sort({ detectedAt: -1, createdAt: -1 })
       .skip((pageNum - 1) * pageSize)
       .limit(pageSize)
       .lean();
