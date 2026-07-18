@@ -693,21 +693,35 @@ async function exportExcel(res, ctx, filename) {
   });
 
   // Sheet 3: 告警明细
+  // 字段映射规范：表头顺序必须与 addRow 写入顺序一一对应，禁止"表头有 X 列、数据写 Y 值"。
+  // 此前问题：表头缺少"塘口ID"列，技术员对账时无法在告警明细中直接定位塘口，
+  //          进而把英文级别（warning/critical）误读为塘口编号，把池塘编号误读为告警级别。
+  // 修复：表头显式补"塘口ID"列放在"时间"之后；每行 addRow 严格按表头顺序写入对应字段。
   const ws3 = wb.addWorksheet('告警明细');
   ws3.columns = [
-    { header: '时间', key: 't', width: 22 },
-    { header: '类型', key: 'type', width: 16 },
-    { header: '级别', key: 'level', width: 10 },
-    { header: '触发值', key: 'val', width: 10 },
-    { header: '阈值', key: 'thr', width: 10 },
-    { header: '描述', key: 'msg', width: 50 }
+    { header: '时间',     key: 'time',   width: 22 },
+    { header: '塘口ID',   key: 'pondId', width: 18 },
+    { header: '类型',     key: 'type',   width: 16 },
+    { header: '级别',     key: 'level',  width: 10 },
+    { header: '触发值',   key: 'val',    width: 10 },
+    { header: '阈值',     key: 'thr',    width: 10 },
+    { header: '描述',     key: 'msg',    width: 50 }
   ];
   alertDocs.forEach((a) => {
     // 修复：导出时间使用 detectedAt（设备真实检测时间），缺失时回退 createdAt，
     // 保证导出报告与平台告警列表时序一致
     const t = a.detectedAt || a.createdAt;
+    // 关键：键名必须与上方 ws3.columns 的 key 一一对应，列顺序一一对应
+    // - time   ← detectedAt/createdAt
+    // - pondId ← a.pondId（数据模型 Alert.pondId）
+    // - type   ← a.type
+    // - level  ← a.level（数据模型 Alert.level，取值 warning/critical）
+    // - val    ← a.value
+    // - thr    ← a.threshold
+    // - msg    ← a.message
     ws3.addRow({
-      t: new Date(t).toLocaleString('zh-CN'),
+      time: new Date(t).toLocaleString('zh-CN'),
+      pondId: a.pondId,
       type: a.type,
       level: a.level,
       val: a.value,
@@ -773,7 +787,9 @@ async function exportPdf(res, ctx, filename) {
   alertDocs.slice(0, 30).forEach((a) => {
     // 修复：PDF 报告时间使用 detectedAt，与平台告警列表/Excel 保持一致
     const t = a.detectedAt || a.createdAt;
-    doc.text(`- ${new Date(t).toLocaleString('zh-CN')}  [${a.level}]  ${a.type}  value=${a.value}  ${a.message || ''}`);
+    // 修复：补齐 pondId 字段，与 Excel 告警明细保持一致，避免运维人员在对账时
+    //      把英文级别 [warning]/[critical] 误读为塘口编号，反之亦然
+    doc.text(`- ${new Date(t).toLocaleString('zh-CN')}  pond=${a.pondId}  [${a.level}]  ${a.type}  value=${a.value}  ${a.message || ''}`);
   });
   if (alertDocs.length > 30) {
     doc.text(`... and ${alertDocs.length - 30} more (see Excel export for full list)`);
