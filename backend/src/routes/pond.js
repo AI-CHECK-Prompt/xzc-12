@@ -6,9 +6,25 @@ const { getPondRealtime, getAllPondsRealtime } = require('../services/redisClien
 const router = express.Router();
 
 // GET /api/ponds - 获取所有塘口列表（含实时状态）
+// Query（均为可选）：
+//   species=南美白对虾   按养殖品种精确匹配
+//   status=offline       按塘口状态精确匹配（仅接受 online/offline）
+// 多个条件之间为 AND 关系；任一条件缺省/为空字符串时，该条件不参与拼装。
 router.get('/', authMiddleware, async (req, res) => {
   try {
-    const ponds = await Pond.find().sort({ createTime: -1 });
+    // 1. 逐字段独立读取 + 严格 trim，避免空串覆盖真实条件 / 隐性 OR
+    const query = {};
+    const species = typeof req.query.species === 'string' ? req.query.species.trim() : '';
+    const status = typeof req.query.status === 'string' ? req.query.status.trim().toLowerCase() : '';
+    if (species) query.species = species;
+    if (status) {
+      if (!['online', 'offline'].includes(status)) {
+        return res.status(400).json({ success: false, message: 'status 仅支持 online/offline' });
+      }
+      query.status = status;
+    }
+
+    const ponds = await Pond.find(query).sort({ createTime: -1 });
 
     // 获取实时数据
     const realtimeData = await getAllPondsRealtime();

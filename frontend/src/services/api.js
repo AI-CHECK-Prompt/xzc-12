@@ -29,8 +29,21 @@ export function login(username, password) {
   return api.post('/auth/login', { username, password });
 }
 
-export function getPonds() {
-  return api.get('/ponds');
+/**
+ * 获取塘口列表，支持按养殖品种/塘口状态组合筛选
+ * @param {Object} [params]
+ * @param {string} [params.species]   养殖品种（如 '南美白对虾'），精确匹配
+ * @param {string} [params.status]    塘口状态（'online' | 'offline'），精确匹配
+ * 多个条件之间为 AND；任一参数缺省/为空时该条件不参与筛选
+ */
+export function getPonds(params) {
+  // 过滤掉空值/未定义，避免把空字符串发给后端被错误地当成有效值
+  const cleanParams = {};
+  if (params && typeof params === 'object') {
+    if (params.species) cleanParams.species = params.species;
+    if (params.status) cleanParams.status = params.status;
+  }
+  return api.get('/ponds', { params: cleanParams });
 }
 
 export function getPondDetail(pondId) {

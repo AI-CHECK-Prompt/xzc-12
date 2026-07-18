@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Card, PullToRefresh, DotLoading, ErrorBlock, NoticeBar } from 'antd-mobile';
+import { Card, PullToRefresh, DotLoading, ErrorBlock, NoticeBar, Selector } from 'antd-mobile';
 import dayjs from 'dayjs';
 import * as api from '../services/api';
 import wsService from '../services/websocket';
@@ -13,15 +13,36 @@ const POLL_INTERVAL_MS = 30000;
 export default function DashboardPage() {
   const navigate = useNavigate();
   const [ponds, setPonds] = useState([]);
+  // allPonds：未筛选的全量塘口，用于构建"养殖品种"下拉的可选项
+  // （避免下拉值随筛选结果动态消失，造成"选了之后再选别的"清空）
+  const [allPonds, setAllPonds] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [alertBanner, setAlertBanner] = useState(null);
+  // 筛选条件：'all' 表示不限
+  const [speciesFilter, setSpeciesFilter] = useState('all');
+  const [statusFilter, setStatusFilter] = useState('all');
   const pollTimerRef = useRef(null);
 
+  // 拉取全量塘口（用于构建筛选下拉的可选项；与列表筛选解耦，避免下拉值随筛选结果消失）
+  const fetchAllPonds = useCallback(async () => {
+    try {
+      const res = await api.getPonds();
+      const pondList = res?.data || res || [];
+      setAllPonds(pondList);
+    } catch {
+      // 静默失败：下拉为空时降级为只显示"全部"选项，不影响主流程
+    }
+  }, []);
+
+  // 按当前筛选条件拉取列表
   const fetchData = useCallback(async () => {
     try {
       setError(null);
-      const res = await api.getPonds();
+      const params = {};
+      if (speciesFilter !== 'all') params.species = speciesFilter;
+      if (statusFilter !== 'all') params.status = statusFilter;
+      const res = await api.getPonds(params);
       const pondList = res?.data || res || [];
 
       // 数据源统一：直接采用后端 /api/ponds 返回的 pond.realtime（来自 Redis），
@@ -41,12 +62,26 @@ export default function DashboardPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [speciesFilter, statusFilter]);
 
   useEffect(() => {
     fetchData();
+    fetchAllPonds();
     fetchUnreadAlerts();
-  }, [fetchData]);
+  }, [fetchData, fetchAllPonds]);
+
+  // 从全量数据中提取实际出现过的品种（去重 + 排序）
+  const speciesOptions = useMemo(() => {
+    const set = new Set();
+    allPonds.forEach((p) => {
+      if (p.species && String(p.species).trim()) set.add(String(p.species).trim());
+    });
+    const list = Array.from(set).sort();
+    return [
+      { label: '全部', value: 'all' },
+      ...list.map((s) => ({ label: s, value: s }))
+    ];
+  }, [allPonds]);
 
   // 轮询拉取，保证列表数据不会长时间滞后于详情
   useEffect(() => {
@@ -164,11 +199,50 @@ export default function DashboardPage() {
         />
       )}
 
+      {/* 筛选区：品种 + 状态，两个条件为 AND 关系 */}
+      <div style={{ background: '#fff', borderRadius: 12, padding: 12, marginBottom: 12 }}>
+        <div style={{ fontSize: 12, color: '#999', marginBottom: 6 }}>养殖品种</div>
+        <Selector
+          options={speciesOptions}
+          value={[speciesFilter]}
+          onChange={(arr) => {
+            if (arr.length > 0) setSpeciesFilter(arr[0]);
+          }}
+          style={{ '--border-radius': '8px' }}
+        />
+        <div style={{ fontSize: 12, color: '#999', margin: '10px 0 6px' }}>塘口状态</div>
+        <Selector
+          options={[
+            { label: '全部', value: 'all' },
+            { label: '在线', value: 'online' },
+            { label: '离线', value: 'offline' }
+          ]}
+          value={[statusFilter]}
+          onChange={(arr) => {
+            if (arr.length > 0) setStatusFilter(arr[0]);
+          }}
+          style={{ '--border-radius': '8px' }}
+        />
+        {(speciesFilter !== 'all' || statusFilter !== 'all') && (
+          <div
+            onClick={() => {
+              setSpeciesFilter('all');
+              setStatusFilter('all');
+            }}
+            style={{ fontSize: 12, color: '#1677ff', marginTop: 10, textAlign: 'right', cursor: 'pointer' }}
+          >
+            清除筛选
+          </div>
+        )}
+      </div>
+
       <PullToRefresh onRefresh={async () => { await fetchData(); }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           {ponds.length === 0 && (
             <div style={{ textAlign: 'center', padding: 40, color: '#999' }}>
-              暂无塘口数据
+              {speciesFilter !== 'all' || statusFilter !== 'all'
+                ? '当前筛选条件下无塘口数据'
+                : '暂无塘口数据'}
             </div>
           )}
 
