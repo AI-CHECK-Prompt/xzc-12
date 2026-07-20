@@ -32,11 +32,7 @@ const pondSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
-  aeratorMode: {
-    type: String,
-    enum: ['auto', 'manual', 'off'],
-    default: 'auto'
-  },
+
   // 命令下发相关：解决"假启动"问题
   commandPending: {
     type: Boolean,
